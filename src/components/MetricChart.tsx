@@ -43,13 +43,13 @@ export default function MetricChart({
   }));
 
   return (
-    <div className="rounded-xl border border-white/10 bg-base-900/80 p-4">
+    <div className="min-w-0 rounded-xl border border-white/10 bg-[#121212]/80 p-4">
       <div className="mb-3 flex items-center justify-between">
         <h3 className="text-sm font-semibold text-white">{title}</h3>
         <span className="text-xs text-white/60">{unit}</span>
       </div>
-      <div className="h-48 w-full">
-        <ResponsiveContainer width="100%" height="100%">
+      <div className="h-48 w-full min-w-0">
+        <ResponsiveContainer width="100%" height="100%" minHeight={160}>
           {type === "bar" ? (
             <BarChart data={chartData}>
               <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.08)" />

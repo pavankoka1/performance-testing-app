@@ -21,7 +21,7 @@ export default function RecordButtons({
         type="button"
         onClick={onStart}
         disabled={isRecording || isProcessing}
-        className="inline-flex items-center justify-center gap-2 rounded-lg bg-accent-gradient px-6 py-3 text-sm font-semibold text-white shadow-glow transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+        className="inline-flex items-center justify-center gap-2 rounded-lg bg-[linear-gradient(135deg,_#4B0082,_#8A2BE2)] px-6 py-3 text-sm font-semibold text-white shadow-[0_0_24px_rgba(138,43,226,0.2)] transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
       >
         <Play className="h-4 w-4" />
         Launch & Start Recording
@@ -30,7 +30,7 @@ export default function RecordButtons({
         type="button"
         onClick={onStop}
         disabled={!isRecording || isProcessing}
-        className="inline-flex items-center justify-center gap-2 rounded-lg border border-white/20 bg-base-900/70 px-6 py-3 text-sm font-semibold text-white transition hover:border-white/40 disabled:cursor-not-allowed disabled:opacity-50"
+        className="inline-flex items-center justify-center gap-2 rounded-lg border border-white/20 bg-[#121212]/70 px-6 py-3 text-sm font-semibold text-white transition hover:border-white/40 disabled:cursor-not-allowed disabled:opacity-50"
       >
         <Square className="h-4 w-4" />
         Stop Recording & Generate Report

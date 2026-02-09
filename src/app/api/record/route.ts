@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { startRecording, stopRecording } from "@/lib/playwrightUtils";
+import { getLatestVideo, startRecording, stopRecording } from "@/lib/playwrightUtils";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -30,5 +30,25 @@ export async function POST(request: Request) {
     const message =
       error instanceof Error ? error.message : "Unexpected error occurred.";
     return NextResponse.json({ error: message }, { status: 500 });
+  }
+}
+
+export async function GET(request: Request) {
+  const { searchParams } = new URL(request.url);
+  if (searchParams.get("video") !== "1") {
+    return NextResponse.json({ error: "Unsupported request." }, { status: 400 });
+  }
+  try {
+    const video = await getLatestVideo();
+    return new NextResponse(video.data, {
+      headers: {
+        "Content-Type": video.contentType,
+        "Cache-Control": "no-store",
+      },
+    });
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Video not available.";
+    return NextResponse.json({ error: message }, { status: 404 });
   }
 }

@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "postinstall": "playwright install chromium"
   },
   "dependencies": {
     "@sparticuz/chromium": "^143.0.4",

@@ -9,9 +9,9 @@
 }
 
 body {
-  @apply bg-base-900 text-white antialiased;
+  @apply bg-[#121212] text-white antialiased;
 }
 
 .text-gradient {
-  @apply bg-accent-gradient bg-clip-text text-transparent;
+  @apply bg-[linear-gradient(135deg,_#4B0082,_#8A2BE2)] bg-clip-text text-transparent;
 }

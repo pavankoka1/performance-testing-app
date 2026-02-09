@@ -21,7 +21,7 @@ export default function URLInput({ value, onChange }: URLInputProps) {
           value={value}
           onChange={(event) => onChange(event.target.value)}
           placeholder="https://example-game.com"
-          className="w-full rounded-lg border border-white/10 bg-base-900/80 py-3 pl-10 pr-4 text-sm text-white placeholder:text-white/40 focus:border-indigo-400 focus:ring-indigo-400"
+          className="w-full rounded-lg border border-white/10 bg-[#121212]/80 py-3 pl-10 pr-4 text-sm text-white placeholder:text-white/40 focus:border-indigo-400 focus:ring-indigo-400"
         />
       </div>
       <p className="text-xs text-white/50">

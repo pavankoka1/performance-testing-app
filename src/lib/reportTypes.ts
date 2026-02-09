@@ -65,5 +65,22 @@ export type PerfReport = {
     shaderCompiles: number;
     otherEvents: number;
   };
+  webVitals: {
+    fcpMs?: number;
+    lcpMs?: number;
+    cls?: number;
+    tbtMs: number;
+    longTaskCount: number;
+    longTaskTotalMs: number;
+  };
+  spikeFrames: Array<{
+    timeSec: number;
+    fps: number;
+    imageDataUrl: string;
+  }>;
+  video: {
+    url: string;
+    format: "webm";
+  } | null;
   suggestions: BottleneckSuggestion[];
 };

@@ -1,6 +1,14 @@
 "use client";
 
-import { BarChart2, ListChecks, Layers, MemoryStick } from "lucide-react";
+import { useRef } from "react";
+import {
+  Activity,
+  BarChart2,
+  ListChecks,
+  Layers,
+  MemoryStick,
+  PlayCircle,
+} from "lucide-react";
 import MetricChart from "./MetricChart";
 import type { PerfReport } from "@/lib/reportTypes";
 
@@ -20,16 +28,17 @@ const formatBytes = (value: number) => {
 };
 
 export default function ReportViewer({ report }: ReportViewerProps) {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
   if (!report) {
     return (
-      <section className="rounded-2xl border border-white/10 bg-base-800/60 p-6 text-sm text-white/60">
+      <section className="rounded-2xl border border-white/10 bg-[#1E1E1E]/60 p-6 text-sm text-white/60">
         Run a session to generate a performance report.
       </section>
     );
   }
 
   return (
-    <section className="rounded-2xl border border-white/10 bg-base-800/90 p-6">
+    <section className="rounded-2xl border border-white/10 bg-[#1E1E1E]/90 p-6">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <h2 className="text-xl font-semibold text-white">
@@ -54,7 +63,7 @@ export default function ReportViewer({ report }: ReportViewerProps) {
         </div>
       </div>
 
-      <div className="mt-6 grid gap-4 lg:grid-cols-2">
+      <div className="mt-6 grid min-w-0 gap-4 lg:grid-cols-2">
         <MetricChart
           title="FPS over time"
           unit="fps"
@@ -94,8 +103,8 @@ export default function ReportViewer({ report }: ReportViewerProps) {
         />
       </div>
 
-      <div className="mt-8 grid gap-4 lg:grid-cols-3">
-        <div className="rounded-xl border border-white/10 bg-base-900/80 p-4">
+      <div className="mt-8 grid gap-4 lg:grid-cols-2 xl:grid-cols-4">
+        <div className="rounded-xl border border-white/10 bg-[#121212]/80 p-4">
           <div className="mb-3 flex items-center gap-2 text-sm font-semibold">
             <BarChart2 className="h-4 w-4 text-indigo-300" />
             Render breakdown
@@ -108,7 +117,7 @@ export default function ReportViewer({ report }: ReportViewerProps) {
           </div>
         </div>
 
-        <div className="rounded-xl border border-white/10 bg-base-900/80 p-4">
+        <div className="rounded-xl border border-white/10 bg-[#121212]/80 p-4">
           <div className="mb-3 flex items-center gap-2 text-sm font-semibold">
             <Layers className="h-4 w-4 text-indigo-300" />
             Layout & paint
@@ -121,7 +130,7 @@ export default function ReportViewer({ report }: ReportViewerProps) {
           </div>
         </div>
 
-        <div className="rounded-xl border border-white/10 bg-base-900/80 p-4">
+        <div className="rounded-xl border border-white/10 bg-[#121212]/80 p-4">
           <div className="mb-3 flex items-center gap-2 text-sm font-semibold">
             <MemoryStick className="h-4 w-4 text-indigo-300" />
             WebGL metrics
@@ -132,9 +141,38 @@ export default function ReportViewer({ report }: ReportViewerProps) {
             <p>Other events: {report.webglMetrics.otherEvents}</p>
           </div>
         </div>
+
+        <div className="rounded-xl border border-white/10 bg-[#121212]/80 p-4">
+          <div className="mb-3 flex items-center gap-2 text-sm font-semibold">
+            <Activity className="h-4 w-4 text-indigo-300" />
+            Web Vitals & TBT
+          </div>
+          <div className="space-y-2 text-sm text-white/70">
+            <p>
+              FCP:{" "}
+              {report.webVitals.fcpMs !== undefined
+                ? `${formatNumber(report.webVitals.fcpMs)}ms`
+                : "-"}
+            </p>
+            <p>
+              LCP:{" "}
+              {report.webVitals.lcpMs !== undefined
+                ? `${formatNumber(report.webVitals.lcpMs)}ms`
+                : "-"}
+            </p>
+            <p>
+              CLS:{" "}
+              {report.webVitals.cls !== undefined
+                ? formatNumber(report.webVitals.cls)
+                : "-"}
+            </p>
+            <p>TBT: {formatNumber(report.webVitals.tbtMs)}ms</p>
+            <p>Long tasks: {report.webVitals.longTaskCount}</p>
+          </div>
+        </div>
       </div>
 
-      <details className="mt-8 rounded-xl border border-white/10 bg-base-900/80 p-4">
+      <details className="mt-8 rounded-xl border border-white/10 bg-[#121212]/80 p-4">
         <summary className="cursor-pointer text-sm font-semibold text-white">
           Bottleneck suggestions
         </summary>
@@ -145,7 +183,7 @@ export default function ReportViewer({ report }: ReportViewerProps) {
             report.suggestions.map((suggestion) => (
               <div
                 key={suggestion.title}
-                className="rounded-lg border border-white/10 bg-base-800/70 px-3 py-2"
+                className="rounded-lg border border-white/10 bg-[#1E1E1E]/70 px-3 py-2"
               >
                 <p className="font-medium text-white">{suggestion.title}</p>
                 <p className="text-white/70">{suggestion.detail}</p>
@@ -155,7 +193,7 @@ export default function ReportViewer({ report }: ReportViewerProps) {
         </div>
       </details>
 
-      <details className="mt-6 rounded-xl border border-white/10 bg-base-900/80 p-4">
+      <details className="mt-6 rounded-xl border border-white/10 bg-[#121212]/80 p-4">
         <summary className="cursor-pointer text-sm font-semibold text-white">
           Long tasks & network requests
         </summary>
@@ -181,7 +219,7 @@ export default function ReportViewer({ report }: ReportViewerProps) {
           </div>
           <div className="max-h-64 overflow-auto rounded-lg border border-white/10">
             <table className="w-full text-left text-xs text-white/70">
-              <thead className="sticky top-0 bg-base-900 text-[11px] uppercase text-white/50">
+              <thead className="sticky top-0 bg-[#121212] text-[11px] uppercase text-white/50">
                 <tr>
                   <th className="px-3 py-2">Request</th>
                   <th className="px-3 py-2">Status</th>
@@ -227,6 +265,77 @@ export default function ReportViewer({ report }: ReportViewerProps) {
               </tbody>
             </table>
           </div>
+        </div>
+      </details>
+
+      <details className="mt-6 rounded-xl border border-white/10 bg-[#121212]/80 p-4">
+        <summary className="cursor-pointer text-sm font-semibold text-white">
+          Visual spike frames
+        </summary>
+        <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {report.spikeFrames.length === 0 ? (
+            <p className="text-sm text-white/60">
+              No spike frames captured yet. Run a longer session to capture frames.
+            </p>
+          ) : (
+            report.spikeFrames.map((frame) => (
+              <div
+                key={`${frame.timeSec}-${frame.fps}`}
+                className="overflow-hidden rounded-lg border border-white/10 bg-[#1E1E1E]/80"
+              >
+                <img
+                  src={frame.imageDataUrl}
+                  alt={`Spike at ${frame.timeSec.toFixed(1)}s`}
+                  className="h-36 w-full object-cover"
+                />
+                <div className="px-3 py-2 text-xs text-white/70">
+                  {frame.timeSec.toFixed(1)}s · {Math.round(frame.fps)} FPS
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </details>
+
+      <details className="mt-6 rounded-xl border border-white/10 bg-[#121212]/80 p-4">
+        <summary className="cursor-pointer text-sm font-semibold text-white">
+          Recording video
+        </summary>
+        <div className="mt-4 space-y-3">
+          {report.video ? (
+            <>
+              <video
+                ref={videoRef}
+                controls
+                className="w-full rounded-lg border border-white/10"
+                src={report.video.url}
+              />
+              {report.spikeFrames.length > 0 && (
+                <div className="flex flex-wrap gap-2 text-xs text-white/70">
+                  {report.spikeFrames.map((frame) => (
+                    <button
+                      key={`jump-${frame.timeSec}`}
+                      type="button"
+                      onClick={() => {
+                        if (videoRef.current) {
+                          videoRef.current.currentTime = frame.timeSec;
+                          videoRef.current.play().catch(() => undefined);
+                        }
+                      }}
+                      className="inline-flex items-center gap-1 rounded-full border border-white/10 px-3 py-1 hover:border-white/30"
+                    >
+                      <PlayCircle className="h-3 w-3 text-indigo-300" />
+                      Jump to {frame.timeSec.toFixed(1)}s
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
+          ) : (
+            <p className="text-sm text-white/60">
+              Video recording is unavailable for this session.
+            </p>
+          )}
         </div>
       </details>
     </section>

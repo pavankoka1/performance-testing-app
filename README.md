@@ -14,6 +14,7 @@ PerfTrace is a web-based performance testing tool that launches a visible Playwr
 
 ```bash
 npm install
+npx playwright install chromium
 npm run dev
 ```
 

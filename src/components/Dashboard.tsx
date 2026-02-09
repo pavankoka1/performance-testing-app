@@ -38,7 +38,7 @@ export default function Dashboard() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "start", url }),
       });
-      const data = await response.json();
+      const data = await readJsonResponse(response);
       if (!response.ok) {
         throw new Error(data.error ?? "Failed to start recording.");
       }
@@ -59,7 +59,7 @@ export default function Dashboard() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "stop" }),
       });
-      const data = await response.json();
+      const data = await readJsonResponse(response);
       if (!response.ok) {
         throw new Error(data.error ?? "Failed to stop recording.");
       }
@@ -76,9 +76,9 @@ export default function Dashboard() {
   };
 
   return (
-    <div className="min-h-screen bg-base-900 text-white">
+    <div className="min-h-screen bg-[#121212] text-white">
       <Toaster position="top-right" />
-      <header className="border-b border-white/10 bg-base-900/80 backdrop-blur">
+      <header className="border-b border-white/10 bg-[#121212]/80 backdrop-blur">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-6">
           <div>
             <p className="text-sm uppercase tracking-[0.3em] text-white/50">
@@ -94,7 +94,7 @@ export default function Dashboard() {
       </header>
 
       <main className="mx-auto flex w-full max-w-6xl flex-col gap-8 px-6 py-10">
-        <section className="rounded-2xl border border-white/10 bg-base-800/90 p-6 shadow-glow">
+        <section className="rounded-2xl border border-white/10 bg-[#1E1E1E]/90 p-6 shadow-[0_0_24px_rgba(138,43,226,0.2)]">
           <div className="flex flex-col gap-6">
             <URLInput value={url} onChange={setUrl} />
             <RecordButtons
@@ -128,3 +128,12 @@ export default function Dashboard() {
     </div>
   );
 }
+
+const readJsonResponse = async (response: Response) => {
+  const text = await response.text();
+  try {
+    return JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    return { error: text || "Unexpected response from server." };
+  }
+};
