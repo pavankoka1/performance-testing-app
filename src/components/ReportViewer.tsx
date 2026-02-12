@@ -1,20 +1,29 @@
 "use client";
 
-import { useRef } from "react";
+import type { PerfReport } from "@/lib/reportTypes";
 import {
   Activity,
   BarChart2,
-  ListChecks,
   Layers,
+  ListChecks,
   MemoryStick,
   PlayCircle,
 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import GraphModal from "./GraphModal";
 import MetricChart from "./MetricChart";
-import type { PerfReport } from "@/lib/reportTypes";
+import SessionTimeline from "./SessionTimeline";
+import SpikeFrameModal from "./SpikeFrameModal";
 
 type ReportViewerProps = {
   report: PerfReport | null;
 };
+
+type GraphModalState = {
+  title: string;
+  unit: string;
+  data: PerfReport["fpsSeries"]["points"];
+} | null;
 
 const formatNumber = (value: number) =>
   new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 }).format(value);
@@ -29,35 +38,67 @@ const formatBytes = (value: number) => {
 
 export default function ReportViewer({ report }: ReportViewerProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [reportTimeSec, setReportTimeSec] = useState(0);
+  const [spikeModalFrame, setSpikeModalFrame] = useState<
+    PerfReport["spikeFrames"][0] | null
+  >(null);
+  const [graphModal, setGraphModal] = useState<GraphModalState>(null);
+
+  const durationSec = report ? report.durationMs / 1000 : 0;
+
+  useEffect(() => {
+    if (!report) return;
+    setReportTimeSec(0);
+  }, [report]);
+
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v || !report?.video) return;
+    const syncFromVideo = () => setReportTimeSec(v.currentTime);
+    v.addEventListener("timeupdate", syncFromVideo);
+    return () => v.removeEventListener("timeupdate", syncFromVideo);
+  }, [report?.video]);
+
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v || !report?.video) return;
+    if (Number.isNaN(v.duration) || v.duration <= 0) return;
+    if (Math.abs(v.currentTime - reportTimeSec) < 0.25) return;
+    v.currentTime = reportTimeSec;
+  }, [report?.video, reportTimeSec]);
+
   if (!report) {
     return (
-      <section className="rounded-2xl border border-white/10 bg-[#1E1E1E]/60 p-6 text-sm text-white/60">
+      <section className="rounded-2xl border border-[var(--border)] bg-[var(--bg-card)]/80 p-8 text-center text-sm text-[var(--fg-muted)]">
         Run a session to generate a performance report.
       </section>
     );
   }
 
   return (
-    <section className="rounded-2xl border border-white/10 bg-[#1E1E1E]/90 p-6">
+    <section className="rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] p-6">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h2 className="text-xl font-semibold text-white">
+          <h2 className="text-xl font-semibold text-[var(--fg)]">
             Session Report
           </h2>
-          <p className="text-sm text-white/60">
+          <p className="text-sm text-[var(--fg-muted)]">
             {new Date(report.startedAt).toLocaleString()} →{" "}
-            {new Date(report.stoppedAt).toLocaleString()} (
-            {formatNumber(report.durationMs / 1000)}s)
+            {new Date(report.stoppedAt).toLocaleString()}{" "}
+            <span className="text-[var(--fg)]">
+              ({(report.durationMs / 1000).toFixed(1)}s full session)
+            </span>
           </p>
         </div>
-        <div className="flex flex-wrap gap-3 text-xs text-white/70">
-          <div className="rounded-full border border-white/10 px-3 py-1">
+        <div className="flex flex-wrap gap-3 text-xs text-[var(--fg-muted)]">
+          <div className="rounded-full border border-[var(--border)] px-3 py-1">
             Requests: {report.networkSummary.requests}
           </div>
-          <div className="rounded-full border border-white/10 px-3 py-1">
-            Avg latency: {formatNumber(report.networkSummary.averageLatencyMs)}ms
+          <div className="rounded-full border border-[var(--border)] px-3 py-1">
+            Avg latency: {formatNumber(report.networkSummary.averageLatencyMs)}
+            ms
           </div>
-          <div className="rounded-full border border-white/10 px-3 py-1">
+          <div className="rounded-full border border-[var(--border)] px-3 py-1">
             Transfer: {formatBytes(report.networkSummary.totalBytes)}
           </div>
         </div>
@@ -68,26 +109,67 @@ export default function ReportViewer({ report }: ReportViewerProps) {
           title="FPS over time"
           unit="fps"
           data={report.fpsSeries.points}
+          durationSec={durationSec}
+          yDomain={[0, 120]}
+          onOpenModal={() =>
+            setGraphModal({
+              title: "FPS over time",
+              unit: "fps",
+              data: report.fpsSeries.points,
+            })
+          }
         />
         <MetricChart
           title="CPU busy time"
           unit="ms"
           data={report.cpuSeries.points}
+          durationSec={durationSec}
+          onOpenModal={() =>
+            setGraphModal({
+              title: "CPU busy time",
+              unit: "ms",
+              data: report.cpuSeries.points,
+            })
+          }
         />
         <MetricChart
           title="GPU busy time"
           unit="ms"
           data={report.gpuSeries.points}
+          durationSec={durationSec}
+          onOpenModal={() =>
+            setGraphModal({
+              title: "GPU busy time",
+              unit: "ms",
+              data: report.gpuSeries.points,
+            })
+          }
         />
         <MetricChart
           title="JS heap"
           unit="MB"
           data={report.memorySeries.points}
+          durationSec={durationSec}
+          onOpenModal={() =>
+            setGraphModal({
+              title: "JS heap",
+              unit: "MB",
+              data: report.memorySeries.points,
+            })
+          }
         />
         <MetricChart
           title="DOM nodes"
           unit="count"
           data={report.domNodesSeries.points}
+          durationSec={durationSec}
+          onOpenModal={() =>
+            setGraphModal({
+              title: "DOM nodes",
+              unit: "count",
+              data: report.domNodesSeries.points,
+            })
+          }
         />
         <MetricChart
           title="Layout & paint totals"
@@ -97,57 +179,61 @@ export default function ReportViewer({ report }: ReportViewerProps) {
             { timeSec: 1, value: report.layoutMetrics.layoutTimeMs },
             { timeSec: 2, value: report.layoutMetrics.paintTimeMs },
           ]}
-          labelFormatter={(point) =>
-            point.timeSec === 1 ? "Layout" : "Paint"
-          }
+          labelFormatter={(point) => (point.timeSec === 1 ? "Layout" : "Paint")}
         />
       </div>
 
       <div className="mt-8 grid gap-4 lg:grid-cols-2 xl:grid-cols-4">
-        <div className="rounded-xl border border-white/10 bg-[#121212]/80 p-4">
-          <div className="mb-3 flex items-center gap-2 text-sm font-semibold">
-            <BarChart2 className="h-4 w-4 text-indigo-300" />
+        <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-elevated)]/80 p-4">
+          <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-[var(--fg)]">
+            <BarChart2 className="h-4 w-4 text-[var(--accent)]" />
             Render breakdown
           </div>
-          <div className="space-y-2 text-sm text-white/70">
+          <div className="space-y-2 text-sm text-[var(--fg-muted)]">
             <p>Script: {formatNumber(report.renderBreakdown.scriptMs)}ms</p>
             <p>Layout: {formatNumber(report.renderBreakdown.layoutMs)}ms</p>
             <p>Raster: {formatNumber(report.renderBreakdown.rasterMs)}ms</p>
-            <p>Composite: {formatNumber(report.renderBreakdown.compositeMs)}ms</p>
+            <p>
+              Composite: {formatNumber(report.renderBreakdown.compositeMs)}ms
+            </p>
           </div>
         </div>
 
-        <div className="rounded-xl border border-white/10 bg-[#121212]/80 p-4">
-          <div className="mb-3 flex items-center gap-2 text-sm font-semibold">
-            <Layers className="h-4 w-4 text-indigo-300" />
+        <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-elevated)]/80 p-4">
+          <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-[var(--fg)]">
+            <Layers className="h-4 w-4 text-[var(--accent)]" />
             Layout & paint
           </div>
-          <div className="space-y-2 text-sm text-white/70">
+          <div className="space-y-2 text-sm text-[var(--fg-muted)]">
             <p>Layouts: {report.layoutMetrics.layoutCount}</p>
             <p>Paints: {report.layoutMetrics.paintCount}</p>
-            <p>Layout time: {formatNumber(report.layoutMetrics.layoutTimeMs)}ms</p>
-            <p>Paint time: {formatNumber(report.layoutMetrics.paintTimeMs)}ms</p>
+            <p>
+              Layout time: {formatNumber(report.layoutMetrics.layoutTimeMs)}ms
+            </p>
+            <p>
+              Paint time: {formatNumber(report.layoutMetrics.paintTimeMs)}ms
+            </p>
           </div>
         </div>
 
-        <div className="rounded-xl border border-white/10 bg-[#121212]/80 p-4">
-          <div className="mb-3 flex items-center gap-2 text-sm font-semibold">
-            <MemoryStick className="h-4 w-4 text-indigo-300" />
+        <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-elevated)]/80 p-4">
+          <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-[var(--fg)]">
+            <MemoryStick className="h-4 w-4 text-[var(--accent)]" />
             WebGL metrics
           </div>
-          <div className="space-y-2 text-sm text-white/70">
+          <div className="space-y-2 text-sm text-[var(--fg-muted)]">
             <p>Draw calls: {report.webglMetrics.drawCalls}</p>
             <p>Shader compiles: {report.webglMetrics.shaderCompiles}</p>
             <p>Other events: {report.webglMetrics.otherEvents}</p>
           </div>
         </div>
 
-        <div className="rounded-xl border border-white/10 bg-[#121212]/80 p-4">
-          <div className="mb-3 flex items-center gap-2 text-sm font-semibold">
-            <Activity className="h-4 w-4 text-indigo-300" />
+        <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-elevated)]/80 p-4">
+          <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-[var(--fg)]">
+            <Activity className="h-4 w-4 text-[var(--accent)]" />
             Web Vitals & TBT
           </div>
-          <div className="space-y-2 text-sm text-white/70">
+          <div className="space-y-2 text-sm text-[var(--fg-muted)]">
             <p>
               FCP:{" "}
               {report.webVitals.fcpMs !== undefined
@@ -172,38 +258,40 @@ export default function ReportViewer({ report }: ReportViewerProps) {
         </div>
       </div>
 
-      <details className="mt-8 rounded-xl border border-white/10 bg-[#121212]/80 p-4">
-        <summary className="cursor-pointer text-sm font-semibold text-white">
+      <details className="mt-8 rounded-xl border border-[var(--border)] bg-[var(--bg-elevated)]/80 p-4">
+        <summary className="cursor-pointer text-sm font-semibold text-[var(--fg)]">
           Bottleneck suggestions
         </summary>
-        <div className="mt-3 space-y-2 text-sm text-white/70">
+        <div className="mt-3 space-y-2 text-sm text-[var(--fg-muted)]">
           {report.suggestions.length === 0 ? (
             <p>No major bottlenecks detected in this session.</p>
           ) : (
             report.suggestions.map((suggestion) => (
               <div
                 key={suggestion.title}
-                className="rounded-lg border border-white/10 bg-[#1E1E1E]/70 px-3 py-2"
+                className="rounded-lg border border-[var(--border)] bg-[var(--bg-card)] px-3 py-2"
               >
-                <p className="font-medium text-white">{suggestion.title}</p>
-                <p className="text-white/70">{suggestion.detail}</p>
+                <p className="font-medium text-[var(--fg)]">
+                  {suggestion.title}
+                </p>
+                <p className="text-[var(--fg-muted)]">{suggestion.detail}</p>
               </div>
             ))
           )}
         </div>
       </details>
 
-      <details className="mt-6 rounded-xl border border-white/10 bg-[#121212]/80 p-4">
-        <summary className="cursor-pointer text-sm font-semibold text-white">
+      <details className="mt-6 rounded-xl border border-[var(--border)] bg-[var(--bg-elevated)]/80 p-4">
+        <summary className="cursor-pointer text-sm font-semibold text-[var(--fg)]">
           Long tasks & network requests
         </summary>
         <div className="mt-4 grid gap-6 lg:grid-cols-2">
           <div>
-            <div className="mb-3 flex items-center gap-2 text-sm font-semibold">
-              <ListChecks className="h-4 w-4 text-indigo-300" />
+            <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-[var(--fg)]">
+              <ListChecks className="h-4 w-4 text-[var(--accent)]" />
               Long tasks ({report.longTasks.count})
             </div>
-            <div className="space-y-2 text-sm text-white/70">
+            <div className="space-y-2 text-sm text-[var(--fg-muted)]">
               <p>Total time: {formatNumber(report.longTasks.totalTimeMs)}ms</p>
               {report.longTasks.topTasks.length === 0 ? (
                 <p>No long tasks captured.</p>
@@ -217,9 +305,9 @@ export default function ReportViewer({ report }: ReportViewerProps) {
               )}
             </div>
           </div>
-          <div className="max-h-64 overflow-auto rounded-lg border border-white/10">
-            <table className="w-full text-left text-xs text-white/70">
-              <thead className="sticky top-0 bg-[#121212] text-[11px] uppercase text-white/50">
+          <div className="max-h-64 overflow-auto rounded-lg border border-[var(--border)]">
+            <table className="w-full text-left text-xs text-[var(--fg-muted)]">
+              <thead className="sticky top-0 bg-[var(--bg)] text-[11px] uppercase text-[var(--fg-muted)]">
                 <tr>
                   <th className="px-3 py-2">Request</th>
                   <th className="px-3 py-2">Status</th>
@@ -238,13 +326,16 @@ export default function ReportViewer({ report }: ReportViewerProps) {
                   report.networkRequests.map((request) => (
                     <tr
                       key={`${request.url}-${request.durationMs ?? 0}`}
-                      className="border-t border-white/10"
+                      className="border-t border-[var(--border)]"
                     >
                       <td className="px-3 py-2">
-                        <p className="truncate" title={request.url}>
+                        <p
+                          className="truncate text-[var(--fg)]"
+                          title={request.url}
+                        >
                           {request.method} {request.url}
                         </p>
-                        <p className="text-[11px] text-white/40">
+                        <p className="text-[11px] text-[var(--fg-muted)]">
                           {request.type ?? "unknown"}
                         </p>
                       </td>
@@ -268,37 +359,63 @@ export default function ReportViewer({ report }: ReportViewerProps) {
         </div>
       </details>
 
-      <details className="mt-6 rounded-xl border border-white/10 bg-[#121212]/80 p-4">
-        <summary className="cursor-pointer text-sm font-semibold text-white">
+      <details className="mt-6 rounded-xl border border-[var(--border)] bg-[var(--bg-elevated)]/80 p-4">
+        <summary className="cursor-pointer text-sm font-semibold text-[var(--fg)]">
           Visual spike frames
         </summary>
         <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {report.spikeFrames.length === 0 ? (
-            <p className="text-sm text-white/60">
-              No spike frames captured yet. Run a longer session to capture frames.
+            <p className="text-sm text-[var(--fg-muted)]">
+              No spike frames captured yet. Run a longer session to capture
+              frames.
             </p>
           ) : (
             report.spikeFrames.map((frame) => (
-              <div
+              <button
+                type="button"
                 key={`${frame.timeSec}-${frame.fps}`}
-                className="overflow-hidden rounded-lg border border-white/10 bg-[#1E1E1E]/80"
+                onClick={() => {
+                  setSpikeModalFrame(frame);
+                  setReportTimeSec(frame.timeSec);
+                }}
+                className="cursor-pointer overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--bg-card)] text-left transition hover:border-[var(--accent)]/50 hover:ring-2 hover:ring-[var(--accent)]/30"
               >
                 <img
                   src={frame.imageDataUrl}
                   alt={`Spike at ${frame.timeSec.toFixed(1)}s`}
                   className="h-36 w-full object-cover"
                 />
-                <div className="px-3 py-2 text-xs text-white/70">
-                  {frame.timeSec.toFixed(1)}s · {Math.round(frame.fps)} FPS
+                <div className="px-3 py-2 text-xs text-[var(--fg-muted)]">
+                  {frame.timeSec.toFixed(1)}s · {Math.round(frame.fps)} FPS —
+                  click to open
                 </div>
-              </div>
+              </button>
             ))
           )}
         </div>
       </details>
 
-      <details className="mt-6 rounded-xl border border-white/10 bg-[#121212]/80 p-4">
-        <summary className="cursor-pointer text-sm font-semibold text-white">
+      {spikeModalFrame && (
+        <SpikeFrameModal
+          report={report}
+          frame={spikeModalFrame}
+          currentTimeSec={reportTimeSec}
+          onTimeChange={setReportTimeSec}
+          onClose={() => setSpikeModalFrame(null)}
+        />
+      )}
+      {graphModal && (
+        <GraphModal
+          title={graphModal.title}
+          unit={graphModal.unit}
+          data={graphModal.data}
+          report={report}
+          onClose={() => setGraphModal(null)}
+        />
+      )}
+
+      <details className="mt-6 rounded-xl border border-[var(--border)] bg-[var(--bg-elevated)]/80 p-4">
+        <summary className="cursor-pointer text-sm font-semibold text-[var(--fg)]">
           Recording video
         </summary>
         <div className="mt-4 space-y-3">
@@ -307,24 +424,43 @@ export default function ReportViewer({ report }: ReportViewerProps) {
               <video
                 ref={videoRef}
                 controls
-                className="w-full rounded-lg border border-white/10"
+                preload="metadata"
+                className="w-full rounded-lg border border-[var(--border)]"
                 src={report.video.url}
+                onLoadedMetadata={() => {
+                  if (videoRef.current && reportTimeSec > 0) {
+                    videoRef.current.currentTime = reportTimeSec;
+                  }
+                }}
               />
+              <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-elevated)]/50 p-3">
+                <p className="mb-2 text-xs font-medium text-[var(--fg-muted)]">
+                  Timeline (0 — {durationSec.toFixed(1)}s)
+                </p>
+                <SessionTimeline
+                  durationSec={durationSec}
+                  currentTimeSec={reportTimeSec}
+                  onTimeChange={setReportTimeSec}
+                  showLabels={true}
+                />
+              </div>
               {report.spikeFrames.length > 0 && (
-                <div className="flex flex-wrap gap-2 text-xs text-white/70">
+                <div className="flex flex-wrap gap-2 text-xs text-[var(--fg-muted)]">
                   {report.spikeFrames.map((frame) => (
                     <button
                       key={`jump-${frame.timeSec}`}
                       type="button"
                       onClick={() => {
-                        if (videoRef.current) {
-                          videoRef.current.currentTime = frame.timeSec;
-                          videoRef.current.play().catch(() => undefined);
+                        setReportTimeSec(frame.timeSec);
+                        const v = videoRef.current;
+                        if (v) {
+                          v.currentTime = frame.timeSec;
+                          v.play().catch(() => undefined);
                         }
                       }}
-                      className="inline-flex items-center gap-1 rounded-full border border-white/10 px-3 py-1 hover:border-white/30"
+                      className="inline-flex items-center gap-1 rounded-full border border-[var(--border)] px-3 py-1 hover:border-[var(--accent)]/50 hover:bg-[var(--accent-dim)]"
                     >
-                      <PlayCircle className="h-3 w-3 text-indigo-300" />
+                      <PlayCircle className="h-3 w-3 text-[var(--accent)]" />
                       Jump to {frame.timeSec.toFixed(1)}s
                     </button>
                   ))}
@@ -332,7 +468,7 @@ export default function ReportViewer({ report }: ReportViewerProps) {
               )}
             </>
           ) : (
-            <p className="text-sm text-white/60">
+            <p className="text-sm text-[var(--fg-muted)]">
               Video recording is unavailable for this session.
             </p>
           )}

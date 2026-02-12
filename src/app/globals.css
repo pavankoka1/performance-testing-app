@@ -2,16 +2,30 @@
 
 :root {
   color-scheme: dark;
+  --bg: #0c0c0f;
+  --bg-card: #141418;
+  --bg-elevated: #1a1a1f;
+  --fg: #f4f4f5;
+  --fg-muted: #a1a1aa;
+  --accent: #8b5cf6;
+  --accent-dim: rgba(139, 92, 246, 0.15);
+  --border: rgba(255, 255, 255, 0.08);
+  --glow: 0 0 32px rgba(139, 92, 246, 0.18);
 }
 
 * {
-  @apply border-white/10;
+  border-color: var(--border);
 }
 
 body {
-  @apply bg-[#121212] text-white antialiased;
+  background: var(--bg);
+  color: var(--fg);
+  @apply antialiased;
 }
 
 .text-gradient {
-  @apply bg-[linear-gradient(135deg,_#4B0082,_#8A2BE2)] bg-clip-text text-transparent;
+  background: linear-gradient(135deg, #6d28d9 0%, #a78bfa 50%, #8b5cf6 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
 }

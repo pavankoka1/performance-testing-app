@@ -2,6 +2,8 @@
 
 PerfTrace is a web-based performance testing tool that launches a visible Playwright-powered Chromium session so you can manually interact with a target URL and generate a detailed performance report.
 
+**Documentation:** For a detailed technical description of how CPU and other metrics are tracked with Playwright and Chromium (CDP, tracing, metrics, Web Vitals), see **[docs/CPU-PERFORMANCE-TRACKING-WITH-PLAYWRIGHT-CHROMIUM.md](docs/CPU-PERFORMANCE-TRACKING-WITH-PLAYWRIGHT-CHROMIUM.md)** (suitable for POC review and implementation reference).
+
 ## Features
 
 - Launch a non-headless Chromium window for manual interaction.

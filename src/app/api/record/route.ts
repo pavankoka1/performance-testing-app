@@ -1,11 +1,16 @@
+import {
+  getLatestVideo,
+  getLiveMetrics,
+  startRecording,
+  stopRecording,
+} from "@/lib/playwrightUtils";
 import { NextResponse } from "next/server";
-import { getLatestVideo, startRecording, stopRecording } from "@/lib/playwrightUtils";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type RecordRequest =
-  | { action: "start"; url: string }
+  | { action: "start"; url: string; cpuThrottle?: 1 | 4 | 6 }
   | { action: "stop" };
 
 export async function POST(request: Request) {
@@ -13,7 +18,8 @@ export async function POST(request: Request) {
     const body = (await request.json()) as RecordRequest;
 
     if (body.action === "start") {
-      const status = await startRecording(body.url);
+      const cpuThrottle = body.cpuThrottle ?? 1;
+      const status = await startRecording(body.url, cpuThrottle);
       return NextResponse.json({ status });
     }
 
@@ -22,10 +28,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ report });
     }
 
-    return NextResponse.json(
-      { error: "Unsupported action." },
-      { status: 400 },
-    );
+    return NextResponse.json({ error: "Unsupported action." }, { status: 400 });
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Unexpected error occurred.";
@@ -35,14 +38,29 @@ export async function POST(request: Request) {
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
-  if (searchParams.get("video") !== "1") {
-    return NextResponse.json({ error: "Unsupported request." }, { status: 400 });
+  const video = searchParams.get("video") === "1";
+  const metrics = searchParams.get("metrics") === "1";
+
+  if (metrics) {
+    try {
+      const live = await getLiveMetrics();
+      return NextResponse.json(live ?? { recording: false });
+    } catch {
+      return NextResponse.json({ recording: false });
+    }
+  }
+
+  if (!video) {
+    return NextResponse.json(
+      { error: "Unsupported request." },
+      { status: 400 }
+    );
   }
   try {
-    const video = await getLatestVideo();
-    return new NextResponse(video.data, {
+    const videoData = await getLatestVideo();
+    return new NextResponse(videoData.data, {
       headers: {
-        "Content-Type": video.contentType,
+        "Content-Type": videoData.contentType,
         "Cache-Control": "no-store",
       },
     });

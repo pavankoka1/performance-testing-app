@@ -1,12 +1,16 @@
 "use client";
 
+import type { PerfReport } from "@/lib/reportTypes";
+import { Activity, Cpu, ShieldCheck } from "lucide-react";
 import { useState } from "react";
 import { Toaster, toast } from "react-hot-toast";
-import { Activity, ShieldCheck } from "lucide-react";
-import URLInput from "./URLInput";
+import LiveMetricsPanel from "./LiveMetricsPanel";
+import MetricsGlossary from "./MetricsGlossary";
 import RecordButtons from "./RecordButtons";
 import ReportViewer from "./ReportViewer";
-import type { PerfReport } from "@/lib/reportTypes";
+import URLInput from "./URLInput";
+
+type CpuThrottle = 1 | 4 | 6;
 
 const isValidUrl = (value: string) => {
   try {
@@ -19,6 +23,7 @@ const isValidUrl = (value: string) => {
 
 export default function Dashboard() {
   const [url, setUrl] = useState("");
+  const [cpuThrottle, setCpuThrottle] = useState<CpuThrottle>(1);
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [report, setReport] = useState<PerfReport | null>(null);
@@ -36,11 +41,19 @@ export default function Dashboard() {
       const response = await fetch("/api/record", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "start", url }),
+        body: JSON.stringify({
+          action: "start",
+          url,
+          cpuThrottle,
+        }),
       });
       const data = await readJsonResponse(response);
       if (!response.ok) {
-        throw new Error(data.error ?? "Failed to start recording.");
+        throw new Error(
+          typeof data.error === "string"
+            ? data.error
+            : "Failed to start recording."
+        );
       }
       toast.success("Recording started. Browser window is ready.");
     } catch (error) {
@@ -61,7 +74,11 @@ export default function Dashboard() {
       });
       const data = await readJsonResponse(response);
       if (!response.ok) {
-        throw new Error(data.error ?? "Failed to stop recording.");
+        throw new Error(
+          typeof data.error === "string"
+            ? data.error
+            : "Failed to stop recording."
+        );
       }
       setReport(data.report as PerfReport);
       toast.success("Trace processed. Report ready.");
@@ -76,52 +93,82 @@ export default function Dashboard() {
   };
 
   return (
-    <div className="min-h-screen bg-[#121212] text-white">
-      <Toaster position="top-right" />
-      <header className="border-b border-white/10 bg-[#121212]/80 backdrop-blur">
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-6">
+    <div className="min-h-screen bg-[var(--bg)] text-[var(--fg)]">
+      <Toaster
+        position="top-right"
+        toastOptions={{
+          className: "!bg-[var(--bg-elevated)] !border-[var(--border)]",
+        }}
+      />
+      <header className="sticky top-0 z-10 border-b border-[var(--border)] bg-[var(--bg)]/90 backdrop-blur-xl">
+        <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-5">
           <div>
-            <p className="text-sm uppercase tracking-[0.3em] text-white/50">
-              PerfTrace
+            <p className="text-xs font-medium uppercase tracking-[0.25em] text-[var(--fg-muted)]">
+              Performance testing
             </p>
-            <h1 className="text-3xl font-semibold text-gradient">PerfTrace</h1>
+            <h1 className="text-2xl font-bold tracking-tight text-gradient sm:text-3xl">
+              PerfTrace
+            </h1>
           </div>
-          <div className="flex items-center gap-2 text-sm text-white/70">
-            <ShieldCheck className="h-4 w-4 text-indigo-300" />
-            Chromium + Playwright ready
+          <div className="flex items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--bg-card)] px-4 py-2 text-sm text-[var(--fg-muted)]">
+            <ShieldCheck className="h-4 w-4 text-violet-400" />
+            Chromium + Playwright
           </div>
         </div>
       </header>
 
-      <main className="mx-auto flex w-full max-w-6xl flex-col gap-8 px-6 py-10">
-        <section className="rounded-2xl border border-white/10 bg-[#1E1E1E]/90 p-6 shadow-[0_0_24px_rgba(138,43,226,0.2)]">
+      <main className="mx-auto flex w-full max-w-6xl flex-col gap-8 px-4 py-8 sm:px-6 sm:py-10">
+        <section className="rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] p-6 shadow-[var(--glow)]">
           <div className="flex flex-col gap-6">
             <URLInput value={url} onChange={setUrl} />
+            <div className="flex flex-col gap-2">
+              <label className="flex items-center gap-2 text-sm font-medium text-[var(--fg)]">
+                <Cpu className="h-4 w-4 text-[var(--accent)]" />
+                CPU throttling (low-end device simulation)
+              </label>
+              <select
+                value={cpuThrottle}
+                onChange={(e) =>
+                  setCpuThrottle(Number(e.target.value) as CpuThrottle)
+                }
+                disabled={isRecording}
+                className="w-full max-w-xs rounded-xl border border-[var(--border)] bg-[var(--bg)] py-2.5 pl-3 pr-8 text-sm text-[var(--fg)] focus:border-[var(--accent)] focus:ring-2 focus:ring-[var(--accent-dim)] disabled:opacity-50"
+              >
+                <option value={1}>1× — No throttling</option>
+                <option value={4}>4× — Slower CPU (e.g. low-end mobile)</option>
+                <option value={6}>6× — Heavier throttle</option>
+              </select>
+            </div>
             <RecordButtons
               isRecording={isRecording}
               isProcessing={isProcessing}
               onStart={handleStart}
               onStop={handleStop}
             />
-            <div className="flex items-center gap-3 text-sm text-white/70">
+            <div className="flex items-center gap-3 text-sm text-[var(--fg-muted)]">
               <span
-                className={`h-2.5 w-2.5 rounded-full ${
-                  isRecording ? "bg-emerald-400" : "bg-white/30"
+                className={`h-2.5 w-2.5 rounded-full shadow-sm ${
+                  isRecording
+                    ? "bg-emerald-400 shadow-emerald-400/50"
+                    : "bg-[var(--fg-muted)]/40"
                 }`}
               />
               {isRecording ? (
-                <span className="flex items-center gap-2">
-                  <Activity className="h-4 w-4 animate-pulse text-emerald-300" />
-                  Recording in progress...
+                <span className="flex items-center gap-2 font-medium text-emerald-400">
+                  <Activity className="h-4 w-4 animate-pulse" />
+                  Recording in progress…
                 </span>
               ) : isProcessing ? (
-                "Processing trace and generating report..."
+                "Processing trace and generating report…"
               ) : (
-                "Idle - launch a session to begin."
+                "Idle — paste a URL and launch to begin."
               )}
             </div>
+            {isRecording && <LiveMetricsPanel isRecording={isRecording} />}
           </div>
         </section>
+
+        <MetricsGlossary />
 
         <ReportViewer report={report} />
       </main>

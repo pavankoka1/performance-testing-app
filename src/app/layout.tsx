@@ -4,13 +4,14 @@ import "./globals.css";
 
 const inter = Inter({
   subsets: ["latin"],
-  variable: "--font-inter",
+  variable: "--font-sans",
+  weight: ["400", "500", "600", "700"],
 });
 
 export const metadata: Metadata = {
-  title: "PerfTrace",
+  title: "PerfTrace — Performance testing",
   description:
-    "Performance tracing dashboard for manual Playwright sessions.",
+    "Record sessions, capture Web Vitals, and analyze performance with CPU throttling and live metrics.",
 };
 
 export default function RootLayout({
@@ -20,7 +21,9 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="dark">
-      <body className={`${inter.variable} font-sans antialiased`}>
+      <body
+        className={`${inter.variable} font-sans antialiased bg-[var(--bg)] text-[var(--fg)]`}
+      >
         {children}
       </body>
     </html>

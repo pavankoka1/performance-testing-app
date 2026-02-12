@@ -11,7 +11,7 @@ import {
   type Request,
 } from "playwright";
 import yauzl from "yauzl";
-import type { PerfReport, MetricPoint } from "./reportTypes";
+import type { MetricPoint, PerfReport } from "./reportTypes";
 
 type TraceEvent = {
   name?: string;
@@ -34,10 +34,16 @@ type TraceSession = {
   fpsSamples: MetricPoint[];
   screenshots: Array<{ timeSec: number; path: string }>;
   screenshotInterval?: NodeJS.Timeout;
+  viewportLockInterval?: NodeJS.Timeout;
   networkRequests: PerfReport["networkRequests"];
   requestIds: WeakMap<Request, string>;
-  pendingRequests: Map<string, { url: string; method: string; startAt: number }>;
+  pendingRequests: Map<
+    string,
+    { url: string; method: string; startAt: number }
+  >;
   sampleInterval?: NodeJS.Timeout;
+  viewportSize: { width: number; height: number };
+  cpuThrottle: number;
 };
 
 let activeSession: TraceSession | null = null;
@@ -58,16 +64,9 @@ const SCRIPT_EVENT_NAMES = new Set([
   "FunctionCall",
 ]);
 
-const RASTER_EVENT_NAMES = new Set([
-  "Rasterize",
-  "RasterTask",
-  "GPUTask",
-]);
+const RASTER_EVENT_NAMES = new Set(["Rasterize", "RasterTask", "GPUTask"]);
 
-const COMPOSITE_EVENT_NAMES = new Set([
-  "CompositeLayers",
-  "UpdateLayerTree",
-]);
+const COMPOSITE_EVENT_NAMES = new Set(["CompositeLayers", "UpdateLayerTree"]);
 
 const LAYOUT_EVENT_NAMES = new Set(["Layout", "UpdateLayoutTree"]);
 
@@ -114,26 +113,32 @@ const ensureValidUrl = (value: string) => {
 
 const getLaunchOptions = async () => {
   const isServerless = Boolean(process.env.VERCEL);
-  const headless =
-    process.env.PERFTRACE_HEADLESS === "true" || isServerless;
+  const headless = process.env.PERFTRACE_HEADLESS === "true" || isServerless;
 
   if (isServerless && headless) {
-    const serverlessChromium = await import("@sparticuz/chromium");
+    const Chromium = (await import("@sparticuz/chromium")).default;
     return {
       headless: true,
-      executablePath: await serverlessChromium.executablePath(),
-      args: serverlessChromium.args,
-      defaultViewport: serverlessChromium.defaultViewport,
+      executablePath: await Chromium.executablePath(),
+      args: Chromium.args,
+      defaultViewport: { width: 1366, height: 768 },
     };
   }
 
   return {
     headless,
-    args: ["--disable-dev-shm-usage"],
+    args: [
+      "--disable-dev-shm-usage",
+      "--window-size=1366,768",
+      "--window-position=0,0",
+    ],
   };
 };
 
-export const startRecording = async (url: string) => {
+export const startRecording = async (
+  url: string,
+  cpuThrottle: 1 | 4 | 6 = 1
+) => {
   if (activeSession) {
     throw new Error("A recording session is already running.");
   }
@@ -147,19 +152,21 @@ export const startRecording = async (url: string) => {
     lastVideoPath = null;
   }
 
+  const viewportWidth = 1366;
+  const viewportHeight = 768;
   const browser = await chromium.launch(launchOptions);
   const context = await browser.newContext({
-    viewport: { width: 1365, height: 768 },
-    recordVideo: { dir: videoDir, size: { width: 1365, height: 768 } },
+    viewport: { width: viewportWidth, height: viewportHeight },
+    recordVideo: {
+      dir: videoDir,
+      size: { width: viewportWidth, height: viewportHeight },
+    },
   });
   const page = await context.newPage();
   const traceCdp = await context.newCDPSession(page);
   const metricsCdp = await context.newCDPSession(page);
 
-  const tracePath = path.join(
-    os.tmpdir(),
-    `perftrace-${randomUUID()}.zip`,
-  );
+  const tracePath = path.join(os.tmpdir(), `perftrace-${randomUUID()}.zip`);
 
   await context.tracing.start({
     screenshots: true,
@@ -169,6 +176,15 @@ export const startRecording = async (url: string) => {
   });
 
   await metricsCdp.send("Performance.enable");
+  if (cpuThrottle > 1) {
+    try {
+      await metricsCdp.send("Emulation.setCPUThrottlingRate", {
+        rate: cpuThrottle,
+      });
+    } catch {
+      // Emulation.setCPUThrottlingRate may not be available in all environments.
+    }
+  }
   await traceCdp.send("Tracing.start", {
     categories: [
       "devtools.timeline",
@@ -184,14 +200,25 @@ export const startRecording = async (url: string) => {
   });
 
   await ensureClientCollectors(page);
+  await ensureMemoryAndDomCollector(page);
 
   await page.goto(safeUrl, { waitUntil: "domcontentloaded" });
   await ensureFpsCollector(page);
   const updateActivePage = async (newPage: Page) => {
     await ensureClientCollectors(newPage);
+    await ensureMemoryAndDomCollector(newPage);
     await ensureFpsCollector(newPage);
     const newMetrics = await context.newCDPSession(newPage);
     await newMetrics.send("Performance.enable");
+    if (cpuThrottle > 1) {
+      try {
+        await newMetrics.send("Emulation.setCPUThrottlingRate", {
+          rate: cpuThrottle,
+        });
+      } catch {
+        // ignore
+      }
+    }
     activeSession = activeSession
       ? { ...activeSession, page: newPage, metricsCdp: newMetrics }
       : activeSession;
@@ -200,7 +227,6 @@ export const startRecording = async (url: string) => {
   context.on("page", (newPage) => {
     updateActivePage(newPage).catch(() => undefined);
   });
-
 
   const samples: PerfSample[] = [];
   const fpsSamples: MetricPoint[] = [];
@@ -247,23 +273,42 @@ export const startRecording = async (url: string) => {
   context.on("requestfinished", onRequestEnd);
   context.on("requestfailed", onRequestEnd);
 
+  const startedAt = Date.now();
+
   const sampleInterval = setInterval(async () => {
     try {
       const metrics = await (activeSession?.metricsCdp ?? metricsCdp).send(
-        "Performance.getMetrics",
+        "Performance.getMetrics"
       );
       const metricMap = new Map(
-        metrics.metrics.map((metric) => [metric.name, metric.value]),
+        metrics.metrics.map((metric) => [metric.name, metric.value])
       );
+      let jsHeapSize =
+        metricMap.get("JSHeapUsedSize") ?? metricMap.get("JSHeapSize") ?? 0;
+      let nodes = metricMap.get("Nodes") ?? metricMap.get("DOMNodeCount") ?? 0;
+
+      const activePage = activeSession?.page ?? page;
+      try {
+        const client = (await activePage.evaluate(() => {
+          const w = window as Window & {
+            __perftraceMemory?: { heapMb: number; nodes: number };
+          };
+          return w.__perftraceMemory ?? null;
+        })) as { heapMb: number; nodes: number } | null;
+        if (client) {
+          if (client.heapMb > 0) jsHeapSize = client.heapMb * 1024 * 1024;
+          if (client.nodes > 0) nodes = client.nodes;
+        }
+      } catch {
+        // Use CDP values only.
+      }
+
       const totals: PerfTotals = {
         taskDuration: metricMap.get("TaskDuration") ?? 0,
         scriptDuration: metricMap.get("ScriptDuration") ?? 0,
         layoutDuration: metricMap.get("LayoutDuration") ?? 0,
-        jsHeapSize:
-          metricMap.get("JSHeapUsedSize") ??
-          metricMap.get("JSHeapSize") ??
-          0,
-        nodes: metricMap.get("Nodes") ?? metricMap.get("DOMNodeCount") ?? 0,
+        jsHeapSize,
+        nodes,
       };
 
       const lastTotals = lastPerfTotals;
@@ -271,10 +316,16 @@ export const startRecording = async (url: string) => {
         ? Math.max(0, (totals.taskDuration - lastTotals.taskDuration) * 1000)
         : 0;
       const deltaScript = lastTotals
-        ? Math.max(0, (totals.scriptDuration - lastTotals.scriptDuration) * 1000)
+        ? Math.max(
+            0,
+            (totals.scriptDuration - lastTotals.scriptDuration) * 1000
+          )
         : 0;
       const deltaLayout = lastTotals
-        ? Math.max(0, (totals.layoutDuration - lastTotals.layoutDuration) * 1000)
+        ? Math.max(
+            0,
+            (totals.layoutDuration - lastTotals.layoutDuration) * 1000
+          )
         : 0;
 
       samples.push({
@@ -282,8 +333,10 @@ export const startRecording = async (url: string) => {
         cpuBusyMs: deltaTask,
         scriptMs: deltaScript,
         layoutMs: deltaLayout,
-        jsHeapMb: totals.jsHeapSize ? totals.jsHeapSize / (1024 * 1024) : undefined,
-        nodes: totals.nodes || undefined,
+        jsHeapMb: totals.jsHeapSize
+          ? totals.jsHeapSize / (1024 * 1024)
+          : undefined,
+        nodes: totals.nodes ? totals.nodes : undefined,
       });
 
       lastPerfTotals = totals;
@@ -299,10 +352,14 @@ export const startRecording = async (url: string) => {
       }
       const shotPath = path.join(
         os.tmpdir(),
-        `perftrace-shot-${randomUUID()}.jpg`,
+        `perftrace-shot-${randomUUID()}.jpg`
       );
       const activePage = activeSession?.page ?? page;
-      await activePage.screenshot({ path: shotPath, type: "jpeg", quality: 60 });
+      await activePage.screenshot({
+        path: shotPath,
+        type: "jpeg",
+        quality: 60,
+      });
       screenshots.push({
         timeSec: Math.max(0, (Date.now() - startedAt) / 1000),
         path: shotPath,
@@ -312,6 +369,18 @@ export const startRecording = async (url: string) => {
     }
   }, 3000);
 
+  const viewportLockInterval = setInterval(() => {
+    const session = activeSession;
+    if (!session) return;
+    const targetPage = session.page;
+    targetPage
+      .setViewportSize({
+        width: viewportWidth,
+        height: viewportHeight,
+      })
+      .catch(() => undefined);
+  }, 2000);
+
   activeSession = {
     browser,
     context,
@@ -319,15 +388,18 @@ export const startRecording = async (url: string) => {
     traceCdp,
     metricsCdp,
     tracePath,
-    startedAt: Date.now(),
+    startedAt,
     samples,
     fpsSamples,
     screenshots,
     screenshotInterval,
+    viewportLockInterval,
     networkRequests,
     requestIds,
     pendingRequests,
     sampleInterval,
+    viewportSize: { width: viewportWidth, height: viewportHeight },
+    cpuThrottle,
   };
 
   return {
@@ -352,6 +424,7 @@ export const stopRecording = async (): Promise<PerfReport> => {
     fpsSamples,
     screenshots,
     screenshotInterval,
+    viewportLockInterval,
     networkRequests,
     sampleInterval,
   } = activeSession;
@@ -363,11 +436,15 @@ export const stopRecording = async (): Promise<PerfReport> => {
   if (screenshotInterval) {
     clearInterval(screenshotInterval);
   }
+  if (viewportLockInterval) {
+    clearInterval(viewportLockInterval);
+  }
 
   try {
     const pageFps = (await page.evaluate(() => {
-      const state = (window as Window & { __perftrace?: { samples?: MetricPoint[] } })
-        .__perftrace;
+      const state = (
+        window as Window & { __perftrace?: { samples?: MetricPoint[] } }
+      ).__perftrace;
       return state?.samples ?? [];
     })) as MetricPoint[];
     fpsSamples.push(...pageFps);
@@ -389,6 +466,33 @@ export const stopRecording = async (): Promise<PerfReport> => {
   }
 
   const stoppedAt = Date.now();
+  const wallClockMs = stoppedAt - startedAt;
+  const shouldLog =
+    typeof process !== "undefined" &&
+    (process.env?.NODE_ENV !== "production" ||
+      process.env?.PERFTRACE_DEBUG === "1");
+  if (shouldLog) {
+    console.log("[PerfTrace] stopRecording.fallbackInput", {
+      wallClockMs,
+      wallClockSec: wallClockMs / 1000,
+      samplesCount: samples.length,
+      samplesTimeSecRange:
+        samples.length > 0
+          ? [
+              Math.min(...samples.map((s) => s.timeSec)),
+              Math.max(...samples.map((s) => s.timeSec)),
+            ]
+          : null,
+      fpsSamplesCount: fpsSamples.length,
+      fpsSamplesTimeSecRange:
+        fpsSamples.length > 0
+          ? [
+              Math.min(...fpsSamples.map((s) => s.timeSec)),
+              Math.max(...fpsSamples.map((s) => s.timeSec)),
+            ]
+          : null,
+    });
+  }
   lastVideoPath = await selectBestVideoPath(pages, pageVideo);
   let report: PerfReport;
   try {
@@ -397,7 +501,10 @@ export const stopRecording = async (): Promise<PerfReport> => {
       fpsSamples,
       networkRequests,
     });
-  } catch {
+  } catch (err) {
+    if (shouldLog) {
+      console.warn("[PerfTrace] parseTrace failed, using fallback report", err);
+    }
     report = buildFallbackReport(startedAt, stoppedAt, {
       samples,
       fpsSamples,
@@ -410,7 +517,8 @@ export const stopRecording = async (): Promise<PerfReport> => {
   if (report.webVitals.cls && report.webVitals.cls > 0.1) {
     report.suggestions.push({
       title: "Layout shifts detected",
-      detail: "CLS is above 0.1. Stabilize layout and reserve space for async content.",
+      detail:
+        "CLS is above 0.1. Stabilize layout and reserve space for async content.",
       severity: "warning",
     });
   }
@@ -424,10 +532,141 @@ export const stopRecording = async (): Promise<PerfReport> => {
   report.video = lastVideoPath
     ? { url: "/api/record?video=1", format: "webm" }
     : null;
+  normalizeReportTimeRange(report);
+  if (shouldLog) {
+    const summary: Record<string, unknown> = {
+      durationMs: report.durationMs,
+      durationSec: report.durationMs / 1000,
+    };
+    for (const key of [
+      "fpsSeries",
+      "cpuSeries",
+      "gpuSeries",
+      "memorySeries",
+      "domNodesSeries",
+    ] as const) {
+      const series = report[key];
+      if (series?.points?.length) {
+        const pts = series.points;
+        summary[key] = {
+          pointCount: pts.length,
+          timeSecRange: [
+            Math.min(...pts.map((p) => p.timeSec)),
+            Math.max(...pts.map((p) => p.timeSec)),
+          ],
+          valueRange: [
+            Math.min(...pts.map((p) => p.value)),
+            Math.max(...pts.map((p) => p.value)),
+          ],
+        };
+      }
+    }
+    console.log("[PerfTrace] stopRecording.reportSummary", summary);
+  }
   await cleanupScreenshots(screenshots);
   await fs.unlink(tracePath);
   return report;
 };
+
+function normalizeReportTimeRange(report: PerfReport): void {
+  const durationSec = report.durationMs / 1000;
+  const debugLog = (label: string, data: Record<string, unknown>) => {
+    if (
+      typeof process !== "undefined" &&
+      (process.env?.NODE_ENV !== "production" ||
+        process.env?.PERFTRACE_DEBUG === "1")
+    ) {
+      console.log(`[PerfTrace] ${label}`, data);
+    }
+  };
+  const seriesKeys = [
+    "fpsSeries",
+    "cpuSeries",
+    "gpuSeries",
+    "memorySeries",
+    "domNodesSeries",
+  ] as const;
+  for (const key of seriesKeys) {
+    const series = report[key];
+    if (!series?.points?.length) continue;
+    const points = series.points;
+    const maxTime = Math.max(...points.map((p) => p.timeSec));
+    const mightBeMs = maxTime > durationSec * 1.5;
+    const valueRange =
+      points.length > 0
+        ? [
+            Math.min(...points.map((p) => p.value)),
+            Math.max(...points.map((p) => p.value)),
+          ]
+        : null;
+    debugLog("normalizeReportTimeRange.before", {
+      key,
+      durationSec,
+      pointCount: points.length,
+      timeSecRangeBefore: [
+        Math.min(...points.map((p) => p.timeSec)),
+        Math.max(...points.map((p) => p.timeSec)),
+      ],
+      valueRange,
+      mightBeMs,
+    });
+    for (const p of series.points) {
+      let t = p.timeSec;
+      if (mightBeMs) t = t / 1000;
+      p.timeSec = Math.max(0, Math.min(durationSec, t));
+    }
+    series.points.sort((a, b) => a.timeSec - b.timeSec);
+    debugLog("normalizeReportTimeRange.after", {
+      key,
+      timeSecRangeAfter: [
+        Math.min(...series.points.map((x) => x.timeSec)),
+        Math.max(...series.points.map((x) => x.timeSec)),
+      ],
+    });
+  }
+  for (const frame of report.spikeFrames) {
+    let t = frame.timeSec;
+    if (t > durationSec * 1.5) t = t / 1000;
+    frame.timeSec = Math.max(0, Math.min(durationSec, t));
+  }
+
+  extendSeriesToFullDuration(report);
+}
+
+function extendSeriesToFullDuration(report: PerfReport): void {
+  const durationSec = report.durationMs / 1000;
+  const seriesKeys = [
+    "fpsSeries",
+    "cpuSeries",
+    "gpuSeries",
+    "memorySeries",
+    "domNodesSeries",
+  ] as const;
+  for (const key of seriesKeys) {
+    const series = report[key];
+    if (!series?.points?.length) continue;
+    const points = series.points;
+    const minTime = Math.min(...points.map((p) => p.timeSec));
+    const maxTime = Math.max(...points.map((p) => p.timeSec));
+    if (minTime > 0.5) {
+      points.unshift({ timeSec: 0, value: points[0].value });
+    }
+    if (maxTime >= durationSec - 0.5) {
+      points.sort((a, b) => a.timeSec - b.timeSec);
+      continue;
+    }
+    const last = points[points.length - 1];
+    if (!last) continue;
+    const step = 2;
+    let t = Math.min(maxTime + step, durationSec);
+    while (t < durationSec - 0.5) {
+      points.push({ timeSec: t, value: last.value });
+      t += step;
+    }
+    points.push({ timeSec: durationSec, value: last.value });
+    points.sort((a, b) => a.timeSec - b.timeSec);
+  }
+}
 
 export const getLatestVideo = async () => {
   if (!lastVideoPath) {
@@ -435,6 +674,47 @@ export const getLatestVideo = async () => {
   }
   const data = await fs.readFile(lastVideoPath);
   return { data, contentType: "video/webm" };
+};
+
+export type LiveMetrics = {
+  recording: true;
+  elapsedSec: number;
+  fps: number | null;
+  cpuBusyMs: number | null;
+  jsHeapMb: number | null;
+  domNodes: number | null;
+};
+
+export const getLiveMetrics = async (): Promise<LiveMetrics | null> => {
+  const session = activeSession;
+  if (!session) return null;
+  const elapsedSec = (Date.now() - session.startedAt) / 1000;
+  const last = session.samples[session.samples.length - 1];
+  let fps: number | null = null;
+  try {
+    const state = (await session.page.evaluate(() => {
+      const w = window as Window & {
+        __perftrace?: { frames: number; last: number; samples: MetricPoint[] };
+      };
+      const p = w.__perftrace;
+      if (!p) return null;
+      if (p.samples.length > 0) {
+        return p.samples[p.samples.length - 1].value;
+      }
+      return p.frames;
+    })) as number | null;
+    fps = state != null ? state : null;
+  } catch {
+    // ignore
+  }
+  return {
+    recording: true,
+    elapsedSec,
+    fps,
+    cpuBusyMs: last ? last.cpuBusyMs : null,
+    jsHeapMb: last?.jsHeapMb ?? null,
+    domNodes: last?.nodes ?? null,
+  };
 };
 
 const parseTrace = async (
@@ -446,7 +726,7 @@ const parseTrace = async (
     samples: PerfSample[];
     fpsSamples: MetricPoint[];
     networkRequests: PerfReport["networkRequests"];
-  },
+  }
 ): Promise<PerfReport> => {
   const tracePayload =
     traceText || (await readTraceFromZip(tracePath).catch(() => ""));
@@ -464,7 +744,57 @@ const parseTrace = async (
     startTs = 0;
     endTs = 0;
   }
-  const durationMs = startTs === endTs ? stoppedAt - startedAt : (endTs - startTs) / 1000;
+  const wallClockDurationMs = Math.max(0, stoppedAt - startedAt);
+  const wallClockDurationSec = wallClockDurationMs / 1000;
+  const rawTraceSpan = endTs - startTs;
+  const traceTsIsMicroseconds = rawTraceSpan > 1e6;
+  const traceDurationMs =
+    startTs < endTs
+      ? traceTsIsMicroseconds
+        ? rawTraceSpan / 1000
+        : rawTraceSpan
+      : 0;
+  const useTraceForSeries =
+    traceDurationMs >= wallClockDurationMs * 0.8 && traceDurationMs > 0;
+  const durationMs = wallClockDurationMs;
+  const traceTsToSec = traceTsIsMicroseconds ? 1_000_000 : 1000;
+
+  const debugLog = (label: string, data: Record<string, unknown>) => {
+    if (
+      typeof process !== "undefined" &&
+      (process.env?.NODE_ENV !== "production" ||
+        process.env?.PERFTRACE_DEBUG === "1")
+    ) {
+      console.log(`[PerfTrace] ${label}`, data);
+    }
+  };
+
+  debugLog("parseTrace.start", {
+    wallClockDurationMs,
+    wallClockDurationSec,
+    rawTraceSpan,
+    traceTsIsMicroseconds,
+    traceTsToSec,
+    traceDurationMs,
+    useTraceForSeries,
+    eventCount: events.length,
+    fallbackSamplesCount: fallback.samples.length,
+    fallbackFpsCount: fallback.fpsSamples.length,
+    fallbackSamplesTimeSecRange:
+      fallback.samples.length > 0
+        ? [
+            Math.min(...fallback.samples.map((s) => s.timeSec)),
+            Math.max(...fallback.samples.map((s) => s.timeSec)),
+          ]
+        : null,
+    fallbackFpsTimeSecRange:
+      fallback.fpsSamples.length > 0
+        ? [
+            Math.min(...fallback.fpsSamples.map((s) => s.timeSec)),
+            Math.max(...fallback.fpsSamples.map((s) => s.timeSec)),
+          ]
+        : null,
+  });
 
   const fpsMap = new Map<number, number>();
   const cpuBusyMap = new Map<number, number>();
@@ -477,7 +807,11 @@ const parseTrace = async (
   let layoutTimeMs = 0;
   let paintTimeMs = 0;
 
-  const longTasks: Array<{ name: string; durationMs: number; startSec: number }> = [];
+  const longTasks: Array<{
+    name: string;
+    durationMs: number;
+    startSec: number;
+  }> = [];
 
   const networkRequests = new Map<
     string,
@@ -504,8 +838,15 @@ const parseTrace = async (
   let webglShaderCompiles = 0;
   let webglOtherEvents = 0;
 
-  const addToBucket = (bucket: Map<number, number>, ts: number, value: number) => {
-    const second = Math.max(0, Math.floor((ts - startTs) / 1_000_000));
+  const addToBucket = (
+    bucket: Map<number, number>,
+    ts: number,
+    value: number
+  ) => {
+    const second = Math.max(
+      0,
+      Math.min(wallClockDurationSec, Math.floor((ts - startTs) / traceTsToSec))
+    );
     bucket.set(second, (bucket.get(second) ?? 0) + value);
   };
 
@@ -556,23 +897,33 @@ const parseTrace = async (
       longTasks.push({
         name,
         durationMs: dur / 1000,
-        startSec: Math.max(0, (ts - startTs) / 1_000_000),
+        startSec: Math.max(
+          0,
+          Math.min(wallClockDurationSec, (ts - startTs) / traceTsToSec)
+        ),
       });
     }
 
     if (name === "UpdateCounters") {
       const data = (event.args?.data ?? {}) as Record<string, number>;
-      const heap = data.jsHeapSizeUsed ?? data.jsHeapSize ?? data.usedJSHeapSize;
+      const heap =
+        data.jsHeapSizeUsed ?? data.jsHeapSize ?? data.usedJSHeapSize;
       const nodes = data.nodes ?? data.documentCount;
       if (typeof heap === "number") {
         memoryPoints.push({
-          timeSec: Math.max(0, (ts - startTs) / 1_000_000),
+          timeSec: Math.max(
+            0,
+            Math.min(wallClockDurationSec, (ts - startTs) / traceTsToSec)
+          ),
           value: heap / (1024 * 1024),
         });
       }
       if (typeof nodes === "number") {
         domPoints.push({
-          timeSec: Math.max(0, (ts - startTs) / 1_000_000),
+          timeSec: Math.max(
+            0,
+            Math.min(wallClockDurationSec, (ts - startTs) / traceTsToSec)
+          ),
           value: nodes,
         });
       }
@@ -626,37 +977,145 @@ const parseTrace = async (
   }
 
   if (scriptMs === 0 && fallback.samples.length > 0) {
-    scriptMs = fallback.samples.reduce((sum, sample) => sum + sample.scriptMs, 0);
+    scriptMs = fallback.samples.reduce(
+      (sum, sample) => sum + sample.scriptMs,
+      0
+    );
   }
 
   if (layoutMs === 0 && fallback.samples.length > 0) {
-    layoutMs = fallback.samples.reduce((sum, sample) => sum + sample.layoutMs, 0);
+    layoutMs = fallback.samples.reduce(
+      (sum, sample) => sum + sample.layoutMs,
+      0
+    );
   }
 
-  const mapToSeries = (bucket: Map<number, number>, label: string, unit: string) => {
+  const mapToSeries = (
+    bucket: Map<number, number>,
+    label: string,
+    unit: string
+  ) => {
     const points = [...bucket.entries()]
       .sort((a, b) => a[0] - b[0])
       .map(([timeSec, value]) => ({ timeSec, value }));
     return { label, unit, points };
   };
 
-  const fpsSeries =
-    fpsMap.size > 0
-      ? mapToSeries(fpsMap, "FPS", "fps")
-      : { label: "FPS", unit: "fps", points: fallback.fpsSamples };
-  const cpuSeries =
-    cpuBusyMap.size > 0
-      ? mapToSeries(cpuBusyMap, "CPU Busy", "ms")
-      : {
-          label: "CPU Busy",
-          unit: "ms",
-          points: fallback.samples.map((sample) => ({
-            timeSec: sample.timeSec,
-            value: sample.cpuBusyMs,
-          })),
-        };
-  const gpuSeries = mapToSeries(gpuBusyMap, "GPU Busy", "ms");
-  const memorySeries = memoryPoints.length
+  const traceFpsPoints = mapToSeries(fpsMap, "FPS", "fps").points;
+  const traceFpsMaxValue =
+    traceFpsPoints.length > 0
+      ? Math.max(...traceFpsPoints.map((p) => p.value))
+      : 0;
+  const traceFpsTimeSpan =
+    traceFpsPoints.length >= 2
+      ? Math.max(...traceFpsPoints.map((p) => p.timeSec)) -
+        Math.min(...traceFpsPoints.map((p) => p.timeSec))
+      : 0;
+  const useTraceFps =
+    useTraceForSeries &&
+    fpsMap.size > 2 &&
+    traceFpsTimeSpan >= wallClockDurationSec * 0.5 &&
+    traceFpsMaxValue <= 200;
+
+  const useTraceCpu =
+    useTraceForSeries &&
+    cpuBusyMap.size > 2 &&
+    (() => {
+      const pts = mapToSeries(cpuBusyMap, "CPU Busy", "ms").points;
+      const span =
+        pts.length >= 2
+          ? Math.max(...pts.map((p) => p.timeSec)) -
+            Math.min(...pts.map((p) => p.timeSec))
+          : 0;
+      return span >= wallClockDurationSec * 0.5;
+    })();
+
+  const useTraceGpu =
+    useTraceForSeries &&
+    gpuBusyMap.size > 2 &&
+    (() => {
+      const pts = mapToSeries(gpuBusyMap, "GPU Busy", "ms").points;
+      const span =
+        pts.length >= 2
+          ? Math.max(...pts.map((p) => p.timeSec)) -
+            Math.min(...pts.map((p) => p.timeSec))
+          : 0;
+      return span >= wallClockDurationSec * 0.5;
+    })();
+
+  const memoryTraceMaxTime =
+    memoryPoints.length > 0
+      ? Math.max(...memoryPoints.map((p) => p.timeSec))
+      : 0;
+  const useTraceMemory =
+    useTraceForSeries &&
+    memoryPoints.length > 0 &&
+    memoryTraceMaxTime >= wallClockDurationSec * 0.8;
+
+  const domTraceMaxTime =
+    domPoints.length > 0 ? Math.max(...domPoints.map((p) => p.timeSec)) : 0;
+  const useTraceDom =
+    useTraceForSeries &&
+    domPoints.length > 0 &&
+    domTraceMaxTime >= wallClockDurationSec * 0.8;
+
+  const capFps = (points: MetricPoint[], maxFps = 120): MetricPoint[] =>
+    points.map((p) => ({
+      ...p,
+      value: Math.min(maxFps, Math.max(0, p.value)),
+    }));
+
+  const fpsSeries = useTraceFps
+    ? {
+        label: "FPS",
+        unit: "fps",
+        points: capFps(traceFpsPoints),
+      }
+    : {
+        label: "FPS",
+        unit: "fps",
+        points: capFps(fallback.fpsSamples),
+      };
+
+  const cpuSeries = useTraceCpu
+    ? mapToSeries(cpuBusyMap, "CPU Busy", "ms")
+    : {
+        label: "CPU Busy",
+        unit: "ms",
+        points: fallback.samples.map((sample) => ({
+          timeSec: sample.timeSec,
+          value: sample.cpuBusyMs,
+        })),
+      };
+
+  const traceGpuPoints = mapToSeries(gpuBusyMap, "GPU Busy", "ms").points;
+  const gpuSeries = useTraceGpu
+    ? mapToSeries(gpuBusyMap, "GPU Busy", "ms")
+    : traceGpuPoints.length === 1
+    ? {
+        label: "GPU Busy",
+        unit: "ms",
+        points: (() => {
+          const val = traceGpuPoints[0].value;
+          const pts: MetricPoint[] = [];
+          for (let t = 0; t <= wallClockDurationSec; t += 10) {
+            pts.push({ timeSec: t, value: val });
+          }
+          if (
+            pts.length > 0 &&
+            pts[pts.length - 1].timeSec < wallClockDurationSec
+          ) {
+            pts.push({
+              timeSec: wallClockDurationSec,
+              value: val,
+            });
+          }
+          return pts;
+        })(),
+      }
+    : { label: "GPU Busy", unit: "ms", points: [] };
+
+  const memorySeries = useTraceMemory
     ? { label: "JS Heap", unit: "MB", points: memoryPoints }
     : {
         label: "JS Heap",
@@ -668,7 +1127,8 @@ const parseTrace = async (
             value: sample.jsHeapMb ?? 0,
           })),
       };
-  const domSeries = domPoints.length
+
+  const domSeries = useTraceDom
     ? { label: "DOM Nodes", unit: "count", points: domPoints }
     : {
         label: "DOM Nodes",
@@ -681,6 +1141,45 @@ const parseTrace = async (
           })),
       };
 
+  debugLog("parseTrace.seriesSource", {
+    useTraceFps,
+    useTraceCpu,
+    useTraceGpu,
+    useTraceMemory,
+    useTraceDom,
+    fpsMapSize: fpsMap.size,
+    cpuBusyMapSize: cpuBusyMap.size,
+    gpuBusyMapSize: gpuBusyMap.size,
+    memoryPointsCount: memoryPoints.length,
+    domPointsCount: domPoints.length,
+    traceFpsMaxValue,
+    traceFpsTimeSpan,
+    memoryTraceMaxTime,
+    domTraceMaxTime,
+  });
+
+  const logSeries = (name: string, points: MetricPoint[], source: string) => {
+    if (points.length === 0) return;
+    const times = points.map((p) => p.timeSec);
+    const values = points.map((p) => p.value);
+    debugLog(`parseTrace.series.${name}`, {
+      source,
+      pointCount: points.length,
+      timeSecRange: [Math.min(...times), Math.max(...times)],
+      valueRange: [Math.min(...values), Math.max(...values)],
+    });
+  };
+
+  logSeries("fps", fpsSeries.points, useTraceFps ? "trace" : "fallback");
+  logSeries("cpu", cpuSeries.points, useTraceCpu ? "trace" : "fallback");
+  logSeries("gpu", gpuSeries.points, useTraceGpu ? "trace" : "fallback");
+  logSeries(
+    "memory",
+    memorySeries.points,
+    useTraceMemory ? "trace" : "fallback"
+  );
+  logSeries("dom", domSeries.points, useTraceDom ? "trace" : "fallback");
+
   const avgFps =
     fpsSeries.points.reduce((sum, point) => sum + point.value, 0) /
     Math.max(1, fpsSeries.points.length);
@@ -689,7 +1188,8 @@ const parseTrace = async (
   if (avgFps > 0 && avgFps < 50) {
     suggestions.push({
       title: "Low frame rate",
-      detail: "Average FPS below 50. Reduce main-thread work or optimize animations.",
+      detail:
+        "Average FPS below 50. Reduce main-thread work or optimize animations.",
       severity: "warning",
     });
   }
@@ -697,7 +1197,8 @@ const parseTrace = async (
   if (longTasks.length > 10) {
     suggestions.push({
       title: "Long tasks detected",
-      detail: "Multiple tasks exceeded 50ms. Split heavy work or debounce handlers.",
+      detail:
+        "Multiple tasks exceeded 50ms. Split heavy work or debounce handlers.",
       severity: "warning",
     });
   }
@@ -705,7 +1206,8 @@ const parseTrace = async (
   if (layoutCount > 100 || layoutTimeMs > durationMs * 0.15) {
     suggestions.push({
       title: "High layout cost",
-      detail: "Layout time is high. Audit layout thrashing and reduce forced reflows.",
+      detail:
+        "Layout time is high. Audit layout thrashing and reduce forced reflows.",
       severity: "warning",
     });
   }
@@ -713,7 +1215,8 @@ const parseTrace = async (
   if (paintCount > 150) {
     suggestions.push({
       title: "Frequent repaints",
-      detail: "High paint count. Consider batching visual updates or simplifying effects.",
+      detail:
+        "High paint count. Consider batching visual updates or simplifying effects.",
       severity: "info",
     });
   }
@@ -734,14 +1237,14 @@ const parseTrace = async (
     fallback.networkRequests.length > 0
       ? fallback.networkRequests
       : [...networkRequests.values()].map((request) => ({
-    url: request.url,
-    method: request.method,
-    status: request.status,
-    type: request.type,
-    transferSize: request.transferSize,
-    durationMs: request.endTs
-      ? (request.endTs - request.startTs) / 1000
-      : undefined,
+          url: request.url,
+          method: request.method,
+          status: request.status,
+          type: request.type,
+          transferSize: request.transferSize,
+          durationMs: request.endTs
+            ? (request.endTs - request.startTs) / 1000
+            : undefined,
         }));
 
   const averageLatency =
@@ -789,7 +1292,10 @@ const parseTrace = async (
     webVitals: {
       tbtMs: 0,
       longTaskCount: longTasks.length,
-      longTaskTotalMs: longTasks.reduce((sum, task) => sum + task.durationMs, 0),
+      longTaskTotalMs: longTasks.reduce(
+        (sum, task) => sum + task.durationMs,
+        0
+      ),
     },
     spikeFrames: [],
     video: null,
@@ -804,31 +1310,31 @@ const buildFallbackReport = (
     samples: PerfSample[];
     fpsSamples: MetricPoint[];
     networkRequests: PerfReport["networkRequests"];
-  },
+  }
 ): PerfReport => {
   const durationMs = Math.max(0, stoppedAt - startedAt);
   const totalScript = fallback.samples.reduce(
     (sum, sample) => sum + sample.scriptMs,
-    0,
+    0
   );
   const totalLayout = fallback.samples.reduce(
     (sum, sample) => sum + sample.layoutMs,
-    0,
+    0
   );
   const totalCpu = fallback.samples.reduce(
     (sum, sample) => sum + sample.cpuBusyMs,
-    0,
+    0
   );
   const totalBytes = fallback.networkRequests.reduce(
     (sum, request) => sum + (request.transferSize ?? 0),
-    0,
+    0
   );
   const avgLatency =
     fallback.networkRequests.length === 0
       ? 0
       : fallback.networkRequests.reduce(
           (sum, request) => sum + (request.durationMs ?? 0),
-          0,
+          0
         ) / fallback.networkRequests.length;
 
   return {
@@ -888,28 +1394,65 @@ const buildFallbackReport = (
     webVitals: {
       tbtMs: fallback.samples.reduce(
         (sum, sample) => sum + Math.max(0, sample.cpuBusyMs - 50),
-        0,
+        0
       ),
       longTaskCount: 0,
       longTaskTotalMs: 0,
     },
     spikeFrames: [],
     video: null,
-    suggestions: totalCpu > durationMs * 0.7
-      ? [
-          {
-            title: "High CPU load",
-            detail: "CPU busy time is high. Reduce main-thread work where possible.",
-            severity: "warning",
-          },
-        ]
-      : [],
+    suggestions:
+      totalCpu > durationMs * 0.7
+        ? [
+            {
+              title: "High CPU load",
+              detail:
+                "CPU busy time is high. Reduce main-thread work where possible.",
+              severity: "warning",
+            },
+          ]
+        : [],
   };
+};
+
+const ensureMemoryAndDomCollector = async (page: Page) => {
+  await page.addInitScript(() => {
+    const w = window as Window & {
+      __perftraceMemory?: { heapMb: number; nodes: number };
+    };
+    if (w.__perftraceMemory !== undefined) return;
+    const sample = () => {
+      try {
+        let heapMb = 0;
+        if (
+          typeof (
+            performance as Performance & { memory?: { usedJSHeapSize: number } }
+          ).memory?.usedJSHeapSize === "number"
+        ) {
+          heapMb =
+            (
+              performance as Performance & {
+                memory?: { usedJSHeapSize: number };
+              }
+            ).memory!.usedJSHeapSize /
+            (1024 * 1024);
+        }
+        const nodes = document.getElementsByTagName("*").length;
+        w.__perftraceMemory = { heapMb, nodes };
+      } catch {
+        w.__perftraceMemory = { heapMb: 0, nodes: 0 };
+      }
+    };
+    sample();
+    setInterval(sample, 1500);
+  });
 };
 
 const ensureClientCollectors = async (page: Page) => {
   await page.addInitScript(() => {
-    const globalWindow = window as Window & { __perftraceCollector?: ClientCollector };
+    const globalWindow = window as Window & {
+      __perftraceCollector?: ClientCollector;
+    };
     if (globalWindow.__perftraceCollector) {
       return;
     }
@@ -1015,7 +1558,9 @@ const ensureFpsCollector = async (page: Page) => {
 const readClientCollectorSnapshot = async (page: Page) => {
   try {
     return (await page.evaluate(() => {
-      const globalWindow = window as Window & { __perftraceCollector?: ClientCollector };
+      const globalWindow = window as Window & {
+        __perftraceCollector?: ClientCollector;
+      };
       return globalWindow.__perftraceCollector ?? null;
     })) as ClientCollector | null;
   } catch {
@@ -1025,7 +1570,7 @@ const readClientCollectorSnapshot = async (page: Page) => {
 
 const deriveWebVitals = (
   collector: ClientCollector | null,
-  longTasks: PerfReport["longTasks"],
+  longTasks: PerfReport["longTasks"]
 ): PerfReport["webVitals"] => {
   if (!collector) {
     return {
@@ -1037,11 +1582,11 @@ const deriveWebVitals = (
 
   const longTaskTotal = collector.longTasks.reduce(
     (sum, task) => sum + task.duration,
-    0,
+    0
   );
   const tbt = collector.longTasks.reduce(
     (sum, task) => sum + Math.max(0, task.duration - 50),
-    0,
+    0
   );
 
   return {
@@ -1056,7 +1601,7 @@ const deriveWebVitals = (
 
 const buildSpikeFrames = async (
   report: PerfReport,
-  screenshots: Array<{ timeSec: number; path: string }>,
+  screenshots: Array<{ timeSec: number; path: string }>
 ): Promise<PerfReport["spikeFrames"]> => {
   if (screenshots.length === 0 || report.fpsSeries.points.length === 0) {
     return [];
@@ -1091,16 +1636,14 @@ const buildSpikeFrames = async (
 };
 
 const cleanupScreenshots = async (
-  screenshots: Array<{ timeSec: number; path: string }>,
+  screenshots: Array<{ timeSec: number; path: string }>
 ) => {
-  await Promise.allSettled(
-    screenshots.map((shot) => fs.unlink(shot.path)),
-  );
+  await Promise.allSettled(screenshots.map((shot) => fs.unlink(shot.path)));
 };
 
 const selectBestVideoPath = async (
   pages: Page[],
-  fallbackVideo: ReturnType<Page["video"]>,
+  fallbackVideo: ReturnType<Page["video"]>
 ) => {
   const candidates: Array<{ path: string; size: number }> = [];
   for (const page of pages) {
@@ -1137,9 +1680,9 @@ const selectBestVideoPath = async (
 
 const endCdpTrace = (cdp: CDPSession): Promise<string> =>
   new Promise((resolve, reject) => {
-    const onComplete = (payload: { stream: string }) => {
+    const onComplete = (payload: { stream?: string }) => {
       cdp.off("Tracing.tracingComplete", onComplete);
-      resolve(payload.stream);
+      resolve(payload.stream ?? "");
     };
     cdp.on("Tracing.tracingComplete", onComplete);
     cdp.send("Tracing.end").catch((error) => {
@@ -1178,7 +1721,11 @@ const parseTraceEvents = (traceText: string): TraceEvent[] => {
     for (const line of lines) {
       try {
         const parsedLine = JSON.parse(line) as
-          | { traceEvents?: TraceEvent[]; events?: TraceEvent[]; event?: TraceEvent }
+          | {
+              traceEvents?: TraceEvent[];
+              events?: TraceEvent[];
+              event?: TraceEvent;
+            }
           | TraceEvent;
 
         if (Array.isArray(parsedLine)) {
@@ -1189,8 +1736,12 @@ const parseTraceEvents = (traceText: string): TraceEvent[] => {
           events.push(...parsedLine.events);
         } else if ("event" in parsedLine && parsedLine.event) {
           events.push(parsedLine.event);
-        } else if (parsedLine.name || parsedLine.ts) {
-          events.push(parsedLine);
+        } else if (
+          "name" in parsedLine &&
+          "ts" in parsedLine &&
+          (parsedLine.name != null || parsedLine.ts != null)
+        ) {
+          events.push(parsedLine as TraceEvent);
         }
       } catch {
         continue;
