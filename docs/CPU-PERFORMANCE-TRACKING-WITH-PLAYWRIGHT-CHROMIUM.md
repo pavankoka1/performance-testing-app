@@ -77,6 +77,7 @@ Both are stored as **time-series** of `(timeSec, cpuBusyMs)` and shown in the **
 
 | CDP domain / method                | Purpose                                                                                                                                                           |
 | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Animation.enable**               | (Experimental) Enables the Animation domain; we listen to `Animation.animationStarted` to capture CSS/Web Animations with keyframes and properties.               |
 | **Performance.enable**             | Turns on the Performance metrics collection for the target.                                                                                                       |
 | **Performance.getMetrics**         | Returns current cumulative metrics (TaskDuration, ScriptDuration, LayoutDuration, JSHeapUsedSize, Nodes, etc.). We poll this every 2s for CPU and other counters. |
 | **Tracing.start**                  | Starts a trace with the given categories and `transferMode: "ReturnAsStream"`.                                                                                    |
@@ -113,15 +114,16 @@ These feed into **CPU** (RunTask, toplevel), **FPS** (frame events), **GPU** (gp
 
 ### 5.2 Other metrics (context for CPU analysis)
 
-| Metric                           | Source                                                                                       | Description                                                                                 |
-| -------------------------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| **FPS**                          | Trace: frame events (DrawFrame, BeginFrame, etc.) or in-page `requestAnimationFrame` counter | Frames per second. Low FPS often indicates CPU (or GPU) saturation.                         |
-| **GPU busy time**                | Trace: events in `gpu` category or name containing "GPU"                                     | GPU work per second. Complements CPU (offload and bottlenecks).                             |
-| **JS Heap**                      | CDP Performance (JSHeapUsedSize) and/or in-page `performance.memory.usedJSHeapSize`          | Heap usage (MB). High or growing heap can imply more GC and CPU cost.                       |
-| **DOM nodes**                    | CDP (Nodes/DOMNodeCount) and/or in-page `document.getElementsByTagName('*').length`          | DOM size. Large trees increase layout/style cost (CPU).                                     |
-| **Layout/Paint counts and time** | Trace: Layout/Paint event names                                                              | Layout and paint event counts and total time; inform “layout thrashing” and paint cost.     |
-| **Web Vitals (FCP, LCP, CLS)**   | In-page PerformanceObserver (paint, largest-contentful-paint, layout-shift)                  | Load and stability metrics; FCP/LCP can be delayed by CPU.                                  |
-| **Network**                      | Playwright `request` / `requestfinished` (and trace Resource\* events)                       | Request count, latency, size. Network can affect how much CPU is used (parsing, execution). |
+| Metric                           | Source                                                                                                             | Description                                                                                 |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------- |
+| **FPS**                          | Trace: frame events (DrawFrame, BeginFrame, etc.) or in-page `requestAnimationFrame` counter                       | Frames per second. Low FPS often indicates CPU (or GPU) saturation.                         |
+| **GPU busy time**                | Trace: events in `gpu` category or name containing "GPU"                                                           | GPU work per second. Complements CPU (offload and bottlenecks).                             |
+| **JS Heap**                      | CDP Performance (JSHeapUsedSize) and/or in-page `performance.memory.usedJSHeapSize`                                | Heap usage (MB). High or growing heap can imply more GC and CPU cost.                       |
+| **DOM nodes**                    | CDP (Nodes/DOMNodeCount) and/or in-page `document.getElementsByTagName('*').length`                                | DOM size. Large trees increase layout/style cost (CPU).                                     |
+| **Layout/Paint counts and time** | Trace: Layout/Paint event names                                                                                    | Layout and paint event counts and total time; inform “layout thrashing” and paint cost.     |
+| **Web Vitals (FCP, LCP, CLS)**   | In-page PerformanceObserver (paint, largest-contentful-paint, layout-shift)                                        | Load and stability metrics; FCP/LCP can be delayed by CPU.                                  |
+| **Network**                      | Playwright `request` / `requestfinished` (and trace Resource\* events)                                             | Request count, latency, size. Network can affect how much CPU is used (parsing, execution). |
+| **Animation metrics**            | CDP Animation domain (animationStarted) + trace events (AnimationFrame, FireAnimationFrame, RequestAnimationFrame) | Per-animation properties, duration, bottleneck hint (layout / paint / compositor).          |
 
 ---
 
@@ -165,6 +167,7 @@ These feed into **CPU** (RunTask, toplevel), **FPS** (frame events), **GPU** (gp
 | DOM nodes                  | Trace UpdateCounters; CDP getMetrics                | In-page DOM count + polling                      |
 | Script/Layout/Paint totals | Trace event names and durations                     | —                                                |
 | FCP / LCP / CLS            | In-page PerformanceObserver                         | —                                                |
+| Animation metrics          | CDP Animation.animationStarted; trace rAF events    | —                                                |
 | Network                    | Playwright request events + trace Resource\*        | —                                                |
 
 ---
@@ -175,6 +178,7 @@ These feed into **CPU** (RunTask, toplevel), **FPS** (frame events), **GPU** (gp
 - **Trace timestamp units:** Chrome can emit timestamps in microseconds or milliseconds. We infer the unit from the trace span and normalize so all series use seconds relative to session start.
 - **Headless vs headed:** All of the above works in both; serverless (e.g. Vercel) typically runs headless with @sparticuz/chromium. Visible browser is mainly for local/manual POC use.
 - **CPU throttling:** `Emulation.setCPUThrottlingRate` is applied when starting the session (and for new pages in the same context) to simulate slower devices; it affects all CPU-derived metrics.
+- **Animation domain:** CDP Animation is experimental; `Animation.enable` may not be available in all Chromium builds. When available, we infer bottleneck hints (layout / paint / compositor) from animated CSS properties. Prefer `transform` and `opacity` for compositor-only, smoother animations.
 
 ---
 

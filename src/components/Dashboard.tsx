@@ -6,6 +6,7 @@ import { useState } from "react";
 import { Toaster, toast } from "react-hot-toast";
 import LiveMetricsPanel from "./LiveMetricsPanel";
 import MetricsGlossary from "./MetricsGlossary";
+import ProcessingLoader from "./ProcessingLoader";
 import RecordButtons from "./RecordButtons";
 import ReportViewer from "./ReportViewer";
 import URLInput from "./URLInput";
@@ -65,6 +66,7 @@ export default function Dashboard() {
   };
 
   const handleStop = async () => {
+    setIsRecording(false);
     setIsProcessing(true);
     try {
       const response = await fetch("/api/record", {
@@ -87,7 +89,6 @@ export default function Dashboard() {
         error instanceof Error ? error.message : "Unable to stop recording.";
       toast.error(message);
     } finally {
-      setIsRecording(false);
       setIsProcessing(false);
     }
   };
@@ -131,7 +132,7 @@ export default function Dashboard() {
                 onChange={(e) =>
                   setCpuThrottle(Number(e.target.value) as CpuThrottle)
                 }
-                disabled={isRecording}
+                disabled={isRecording || isProcessing}
                 className="w-full max-w-xs rounded-xl border border-[var(--border)] bg-[var(--bg)] py-2.5 pl-3 pr-8 text-sm text-[var(--fg)] focus:border-[var(--accent)] focus:ring-2 focus:ring-[var(--accent-dim)] disabled:opacity-50"
               >
                 <option value={1}>1× — No throttling</option>
@@ -170,7 +171,7 @@ export default function Dashboard() {
 
         <MetricsGlossary />
 
-        <ReportViewer report={report} />
+        {isProcessing ? <ProcessingLoader /> : <ReportViewer report={report} />}
       </main>
     </div>
   );

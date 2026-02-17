@@ -8,8 +8,10 @@ import {
   ListChecks,
   MemoryStick,
   PlayCircle,
+  Sparkles,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import AnimationTimeline from "./AnimationTimeline";
 import GraphModal from "./GraphModal";
 import MetricChart from "./MetricChart";
 import SessionTimeline from "./SessionTimeline";
@@ -181,6 +183,23 @@ export default function ReportViewer({ report }: ReportViewerProps) {
           ]}
           labelFormatter={(point) => (point.timeSec === 1 ? "Layout" : "Paint")}
         />
+        <MetricChart
+          title="Animation frames per second"
+          unit="count"
+          data={
+            report.animationMetrics?.animationFrameEventsPerSec?.points ?? []
+          }
+          durationSec={durationSec}
+          onOpenModal={() =>
+            setGraphModal({
+              title: "Animation frames per second",
+              unit: "count",
+              data:
+                report.animationMetrics?.animationFrameEventsPerSec?.points ??
+                [],
+            })
+          }
+        />
       </div>
 
       <div className="mt-8 grid gap-4 lg:grid-cols-2 xl:grid-cols-4">
@@ -230,6 +249,28 @@ export default function ReportViewer({ report }: ReportViewerProps) {
 
         <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-elevated)]/80 p-4">
           <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-[var(--fg)]">
+            <Sparkles className="h-4 w-4 text-[var(--accent)]" />
+            Animation metrics
+          </div>
+          <div className="space-y-2 text-sm text-[var(--fg-muted)]">
+            <p>
+              Total animations: {report.animationMetrics?.totalAnimations ?? 0}
+            </p>
+            <p>
+              Tracked (CDP): {report.animationMetrics?.animations?.length ?? 0}
+            </p>
+            <p>
+              rAF frames (trace):{" "}
+              {(
+                report.animationMetrics?.animationFrameEventsPerSec?.points ??
+                []
+              ).reduce((s, p) => s + p.value, 0)}
+            </p>
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-elevated)]/80 p-4">
+          <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-[var(--fg)]">
             <Activity className="h-4 w-4 text-[var(--accent)]" />
             Web Vitals & TBT
           </div>
@@ -256,6 +297,18 @@ export default function ReportViewer({ report }: ReportViewerProps) {
             <p>Long tasks: {report.webVitals.longTaskCount}</p>
           </div>
         </div>
+      </div>
+
+      <div className="mt-8 rounded-xl border border-[var(--border)] bg-[var(--bg-elevated)]/80 p-4">
+        <div className="mb-4 flex items-center gap-2 text-sm font-semibold text-[var(--fg)]">
+          <Sparkles className="h-4 w-4 text-[var(--accent)]" />
+          Animations & properties — timeline
+        </div>
+        <AnimationTimeline
+          animations={report.animationMetrics?.animations ?? []}
+          durationSec={durationSec}
+          formatNumber={formatNumber}
+        />
       </div>
 
       <details className="mt-8 rounded-xl border border-[var(--border)] bg-[var(--bg-elevated)]/80 p-4">
@@ -296,8 +349,8 @@ export default function ReportViewer({ report }: ReportViewerProps) {
               {report.longTasks.topTasks.length === 0 ? (
                 <p>No long tasks captured.</p>
               ) : (
-                report.longTasks.topTasks.map((task) => (
-                  <div key={`${task.name}-${task.startSec}`}>
+                report.longTasks.topTasks.map((task, i) => (
+                  <div key={`task-${i}-${task.name}-${task.startSec}`}>
                     {task.name} — {formatNumber(task.durationMs)}ms at{" "}
                     {formatNumber(task.startSec)}s
                   </div>
@@ -323,9 +376,9 @@ export default function ReportViewer({ report }: ReportViewerProps) {
                     </td>
                   </tr>
                 ) : (
-                  report.networkRequests.map((request) => (
+                  report.networkRequests.map((request, i) => (
                     <tr
-                      key={`${request.url}-${request.durationMs ?? 0}`}
+                      key={`req-${i}-${request.url}`}
                       className="border-t border-[var(--border)]"
                     >
                       <td className="px-3 py-2">
@@ -370,10 +423,10 @@ export default function ReportViewer({ report }: ReportViewerProps) {
               frames.
             </p>
           ) : (
-            report.spikeFrames.map((frame) => (
+            report.spikeFrames.map((frame, i) => (
               <button
                 type="button"
-                key={`${frame.timeSec}-${frame.fps}`}
+                key={`spike-${i}-${frame.timeSec}`}
                 onClick={() => {
                   setSpikeModalFrame(frame);
                   setReportTimeSec(frame.timeSec);
@@ -446,9 +499,9 @@ export default function ReportViewer({ report }: ReportViewerProps) {
               </div>
               {report.spikeFrames.length > 0 && (
                 <div className="flex flex-wrap gap-2 text-xs text-[var(--fg-muted)]">
-                  {report.spikeFrames.map((frame) => (
+                  {report.spikeFrames.map((frame, i) => (
                     <button
-                      key={`jump-${frame.timeSec}`}
+                      key={`jump-${i}-${frame.timeSec}`}
                       type="button"
                       onClick={() => {
                         setReportTimeSec(frame.timeSec);

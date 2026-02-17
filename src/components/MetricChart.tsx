@@ -42,7 +42,8 @@ export default function MetricChart({
   onOpenModal,
   yDomain,
 }: MetricChartProps) {
-  const chartData = data.map((point) => ({
+  const chartData = data.map((point, i) => ({
+    id: i,
     time: labelFormatter
       ? labelFormatter(point)
       : `${Math.round(point.timeSec)}s`,

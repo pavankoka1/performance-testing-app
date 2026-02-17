@@ -44,6 +44,7 @@ type TraceSession = {
   sampleInterval?: NodeJS.Timeout;
   viewportSize: { width: number; height: number };
   cpuThrottle: number;
+  collectedAnimations: CollectedAnimation[];
 };
 
 let activeSession: TraceSession | null = null;
@@ -72,7 +73,97 @@ const LAYOUT_EVENT_NAMES = new Set(["Layout", "UpdateLayoutTree"]);
 
 const PAINT_EVENT_NAMES = new Set(["Paint", "PaintImage"]);
 
+const ANIMATION_FRAME_EVENT_NAMES = new Set([
+  "AnimationFrame",
+  "FireAnimationFrame",
+  "RequestAnimationFrame",
+  "Animation Frame Fired",
+  "DrawFrame",
+  "BeginFrame",
+  "SwapBuffers",
+  "CompositeLayers",
+]);
+
 const WEBGL_EVENT_HINTS = ["WebGL", "glDraw", "GL.Draw", "DrawElements"];
+
+const LAYOUT_TRIGGERING_PROPS = new Set([
+  "width",
+  "height",
+  "top",
+  "left",
+  "right",
+  "bottom",
+  "margin",
+  "padding",
+  "border",
+  "font-size",
+  "display",
+  "position",
+]);
+
+const PAINT_TRIGGERING_PROPS = new Set([
+  "color",
+  "background",
+  "box-shadow",
+  "outline",
+  "filter",
+  "border-radius",
+]);
+
+function inferBottleneck(
+  properties?: string[],
+  animationName?: string
+): "compositor" | "paint" | "layout" | undefined {
+  if (properties?.length) {
+    const lower = properties.map((p) => p.toLowerCase());
+    if (
+      lower.some(
+        (p) =>
+          LAYOUT_TRIGGERING_PROPS.has(p) ||
+          p.includes("margin") ||
+          p.includes("padding")
+      )
+    )
+      return "layout";
+    if (
+      lower.some(
+        (p) =>
+          PAINT_TRIGGERING_PROPS.has(p) ||
+          p.includes("shadow") ||
+          p.includes("background")
+      )
+    )
+      return "paint";
+    if (lower.some((p) => p === "transform" || p === "opacity"))
+      return "compositor";
+  }
+  const name = (animationName ?? "").toLowerCase();
+  if (name.startsWith("cc-")) return "compositor";
+  if (name.startsWith("blink-") || name.includes("style")) return "layout";
+  if (
+    name.includes("fade") ||
+    name.includes("opacity") ||
+    name.includes("transform")
+  )
+    return "compositor";
+  if (
+    name.includes("skeleton") ||
+    name.includes("shimmer") ||
+    name.includes("pulse")
+  )
+    return "compositor";
+  return undefined;
+}
+
+type CollectedAnimation = {
+  id: string;
+  name: string;
+  type: "CSSTransition" | "CSSAnimation" | "WebAnimation";
+  startTimeSec?: number;
+  durationMs?: number;
+  delayMs?: number;
+  properties?: string[];
+};
 
 type PerfTotals = {
   taskDuration: number;
@@ -176,6 +267,55 @@ export const startRecording = async (
   });
 
   await metricsCdp.send("Performance.enable");
+  const collectedAnimations: CollectedAnimation[] = [];
+  try {
+    await metricsCdp.send("Animation.enable");
+    metricsCdp.on(
+      "Animation.animationStarted",
+      (params: { animation: unknown }) => {
+        const a = (params as { animation: Record<string, unknown> }).animation;
+        if (!a || typeof a.id !== "string") return;
+        const source = a.source as Record<string, unknown> | undefined;
+        const keyframesRule = source?.keyframesRule as
+          | {
+              keyframes?: Array<Record<string, unknown>>;
+            }
+          | undefined;
+        const keyframeList = keyframesRule?.keyframes ?? [];
+        const properties: string[] = [];
+        for (const kf of keyframeList) {
+          const style = kf.style as Record<string, string> | undefined;
+          if (style && typeof style === "object") {
+            for (const key of Object.keys(style)) {
+              if (
+                key !== "offset" &&
+                key !== "easing" &&
+                !properties.includes(key)
+              )
+                properties.push(key);
+            }
+          }
+        }
+        const duration =
+          typeof source?.duration === "number" ? source.duration : undefined;
+        const delay =
+          typeof source?.delay === "number" ? source.delay : undefined;
+        collectedAnimations.push({
+          id: a.id,
+          name: (a.name as string) ?? "",
+          type:
+            (a.type as "CSSTransition" | "CSSAnimation" | "WebAnimation") ??
+            "WebAnimation",
+          startTimeSec: (Date.now() - recordingStartMs) / 1000,
+          durationMs: duration != null ? duration : undefined,
+          delayMs: delay != null ? delay : undefined,
+          properties: properties.length ? properties : undefined,
+        });
+      }
+    );
+  } catch {
+    // Animation domain is experimental and may not be available
+  }
   if (cpuThrottle > 1) {
     try {
       await metricsCdp.send("Emulation.setCPUThrottlingRate", {
@@ -202,6 +342,7 @@ export const startRecording = async (
   await ensureClientCollectors(page);
   await ensureMemoryAndDomCollector(page);
 
+  const recordingStartMs = Date.now();
   await page.goto(safeUrl, { waitUntil: "domcontentloaded" });
   await ensureFpsCollector(page);
   const updateActivePage = async (newPage: Page) => {
@@ -210,6 +351,55 @@ export const startRecording = async (
     await ensureFpsCollector(newPage);
     const newMetrics = await context.newCDPSession(newPage);
     await newMetrics.send("Performance.enable");
+    try {
+      await newMetrics.send("Animation.enable");
+      newMetrics.on(
+        "Animation.animationStarted",
+        (params: { animation: unknown }) => {
+          const a = (params as { animation: Record<string, unknown> })
+            .animation;
+          if (!a || typeof a.id !== "string") return;
+          const source = a.source as Record<string, unknown> | undefined;
+          const keyframesRule = source?.keyframesRule as
+            | {
+                keyframes?: Array<Record<string, unknown>>;
+              }
+            | undefined;
+          const keyframeList = keyframesRule?.keyframes ?? [];
+          const properties: string[] = [];
+          for (const kf of keyframeList) {
+            const style = kf.style as Record<string, string> | undefined;
+            if (style && typeof style === "object") {
+              for (const key of Object.keys(style)) {
+                if (
+                  key !== "offset" &&
+                  key !== "easing" &&
+                  !properties.includes(key)
+                )
+                  properties.push(key);
+              }
+            }
+          }
+          const duration =
+            typeof source?.duration === "number" ? source.duration : undefined;
+          const delay =
+            typeof source?.delay === "number" ? source.delay : undefined;
+          collectedAnimations.push({
+            id: a.id,
+            name: (a.name as string) ?? "",
+            type:
+              (a.type as "CSSTransition" | "CSSAnimation" | "WebAnimation") ??
+              "WebAnimation",
+            startTimeSec: (Date.now() - recordingStartMs) / 1000,
+            durationMs: duration != null ? duration : undefined,
+            delayMs: delay != null ? delay : undefined,
+            properties: properties.length ? properties : undefined,
+          });
+        }
+      );
+    } catch {
+      // Animation domain may not be available
+    }
     if (cpuThrottle > 1) {
       try {
         await newMetrics.send("Emulation.setCPUThrottlingRate", {
@@ -273,8 +463,6 @@ export const startRecording = async (
   context.on("requestfinished", onRequestEnd);
   context.on("requestfailed", onRequestEnd);
 
-  const startedAt = Date.now();
-
   const sampleInterval = setInterval(async () => {
     try {
       const metrics = await (activeSession?.metricsCdp ?? metricsCdp).send(
@@ -329,7 +517,7 @@ export const startRecording = async (
         : 0;
 
       samples.push({
-        timeSec: Math.max(0, (Date.now() - startedAt) / 1000),
+        timeSec: Math.max(0, (Date.now() - recordingStartMs) / 1000),
         cpuBusyMs: deltaTask,
         scriptMs: deltaScript,
         layoutMs: deltaLayout,
@@ -361,7 +549,7 @@ export const startRecording = async (
         quality: 60,
       });
       screenshots.push({
-        timeSec: Math.max(0, (Date.now() - startedAt) / 1000),
+        timeSec: Math.max(0, (Date.now() - recordingStartMs) / 1000),
         path: shotPath,
       });
     } catch {
@@ -388,7 +576,7 @@ export const startRecording = async (
     traceCdp,
     metricsCdp,
     tracePath,
-    startedAt,
+    startedAt: recordingStartMs,
     samples,
     fpsSamples,
     screenshots,
@@ -400,6 +588,7 @@ export const startRecording = async (
     sampleInterval,
     viewportSize: { width: viewportWidth, height: viewportHeight },
     cpuThrottle,
+    collectedAnimations,
   };
 
   return {
@@ -409,6 +598,7 @@ export const startRecording = async (
 };
 
 export const stopRecording = async (): Promise<PerfReport> => {
+  const stopRequestedAt = Date.now();
   if (!activeSession) {
     throw new Error("No active session to stop.");
   }
@@ -427,6 +617,7 @@ export const stopRecording = async (): Promise<PerfReport> => {
     viewportLockInterval,
     networkRequests,
     sampleInterval,
+    collectedAnimations = [],
   } = activeSession;
   activeSession = null;
 
@@ -465,8 +656,8 @@ export const stopRecording = async (): Promise<PerfReport> => {
     await browser.close().catch(() => undefined);
   }
 
-  const stoppedAt = Date.now();
-  const wallClockMs = stoppedAt - startedAt;
+  const stoppedAt = stopRequestedAt;
+  const wallClockMs = stopRequestedAt - startedAt;
   const shouldLog =
     typeof process !== "undefined" &&
     (process.env?.NODE_ENV !== "production" ||
@@ -500,6 +691,7 @@ export const stopRecording = async (): Promise<PerfReport> => {
       samples,
       fpsSamples,
       networkRequests,
+      collectedAnimations,
     });
   } catch (err) {
     if (shouldLog) {
@@ -509,6 +701,7 @@ export const stopRecording = async (): Promise<PerfReport> => {
       samples,
       fpsSamples,
       networkRequests,
+      collectedAnimations,
     });
   }
 
@@ -726,6 +919,7 @@ const parseTrace = async (
     samples: PerfSample[];
     fpsSamples: MetricPoint[];
     networkRequests: PerfReport["networkRequests"];
+    collectedAnimations?: CollectedAnimation[];
   }
 ): Promise<PerfReport> => {
   const tracePayload =
@@ -754,10 +948,14 @@ const parseTrace = async (
         ? rawTraceSpan / 1000
         : rawTraceSpan
       : 0;
-  const useTraceForSeries =
-    traceDurationMs >= wallClockDurationMs * 0.8 && traceDurationMs > 0;
   const durationMs = wallClockDurationMs;
   const traceTsToSec = traceTsIsMicroseconds ? 1_000_000 : 1000;
+  const traceSpanTooLarge =
+    traceDurationMs > wallClockDurationMs * 10 && traceDurationMs > 60000;
+  const useTraceForSeries =
+    !traceSpanTooLarge &&
+    traceDurationMs >= wallClockDurationMs * 0.8 &&
+    traceDurationMs > 0;
 
   const debugLog = (label: string, data: Record<string, unknown>) => {
     if (
@@ -838,15 +1036,28 @@ const parseTrace = async (
   let webglShaderCompiles = 0;
   let webglOtherEvents = 0;
 
+  const animationFrameMap = new Map<number, number>();
+
+  const tsToSec = (ts: number): number => {
+    if (traceSpanTooLarge && rawTraceSpan > 0) {
+      const ratio = (ts - startTs) / rawTraceSpan;
+      return Math.max(
+        0,
+        Math.min(wallClockDurationSec, ratio * wallClockDurationSec)
+      );
+    }
+    return Math.max(
+      0,
+      Math.min(wallClockDurationSec, (ts - startTs) / traceTsToSec)
+    );
+  };
+
   const addToBucket = (
     bucket: Map<number, number>,
     ts: number,
     value: number
   ) => {
-    const second = Math.max(
-      0,
-      Math.min(wallClockDurationSec, Math.floor((ts - startTs) / traceTsToSec))
-    );
+    const second = Math.floor(tsToSec(ts));
     bucket.set(second, (bucket.get(second) ?? 0) + value);
   };
 
@@ -893,14 +1104,15 @@ const parseTrace = async (
       compositeMs += dur / 1000;
     }
 
+    if (ANIMATION_FRAME_EVENT_NAMES.has(name)) {
+      addToBucket(animationFrameMap, ts, 1);
+    }
+
     if (name === "RunTask" && dur / 1000 > 50) {
       longTasks.push({
         name,
         durationMs: dur / 1000,
-        startSec: Math.max(
-          0,
-          Math.min(wallClockDurationSec, (ts - startTs) / traceTsToSec)
-        ),
+        startSec: tsToSec(ts),
       });
     }
 
@@ -911,19 +1123,13 @@ const parseTrace = async (
       const nodes = data.nodes ?? data.documentCount;
       if (typeof heap === "number") {
         memoryPoints.push({
-          timeSec: Math.max(
-            0,
-            Math.min(wallClockDurationSec, (ts - startTs) / traceTsToSec)
-          ),
+          timeSec: tsToSec(ts),
           value: heap / (1024 * 1024),
         });
       }
       if (typeof nodes === "number") {
         domPoints.push({
-          timeSec: Math.max(
-            0,
-            Math.min(wallClockDurationSec, (ts - startTs) / traceTsToSec)
-          ),
+          timeSec: tsToSec(ts),
           value: nodes,
         });
       }
@@ -1221,6 +1427,17 @@ const parseTrace = async (
     });
   }
 
+  const layoutAnimations = (fallback.collectedAnimations ?? []).filter(
+    (a) => inferBottleneck(a.properties, a.name) === "layout"
+  );
+  if (layoutAnimations.length > 0) {
+    suggestions.push({
+      title: "Layout-triggering animations",
+      detail: `${layoutAnimations.length} animation(s) use layout-triggering properties (e.g. width, margin). Prefer transform and opacity for smoother frames.`,
+      severity: "warning",
+    });
+  }
+
   if (memoryPoints.length >= 2) {
     const startMem = memoryPoints[0].value;
     const endMem = memoryPoints[memoryPoints.length - 1].value;
@@ -1289,6 +1506,26 @@ const parseTrace = async (
       shaderCompiles: webglShaderCompiles,
       otherEvents: webglOtherEvents,
     },
+    animationMetrics: {
+      animations: (fallback.collectedAnimations ?? []).map((a) => ({
+        id: a.id,
+        name: a.name,
+        type: a.type,
+        startTimeSec: a.startTimeSec,
+        durationMs: a.durationMs,
+        delayMs: a.delayMs,
+        properties: a.properties,
+        bottleneckHint: inferBottleneck(a.properties, a.name),
+      })),
+      animationFrameEventsPerSec: mapToSeries(
+        animationFrameMap,
+        "Animation frames",
+        "count"
+      ),
+      totalAnimations:
+        (fallback.collectedAnimations?.length ?? 0) +
+        [...animationFrameMap.values()].reduce((s, v) => s + v, 0),
+    },
     webVitals: {
       tbtMs: 0,
       longTaskCount: longTasks.length,
@@ -1310,6 +1547,7 @@ const buildFallbackReport = (
     samples: PerfSample[];
     fpsSamples: MetricPoint[];
     networkRequests: PerfReport["networkRequests"];
+    collectedAnimations?: CollectedAnimation[];
   }
 ): PerfReport => {
   const durationMs = Math.max(0, stoppedAt - startedAt);
@@ -1391,6 +1629,24 @@ const buildFallbackReport = (
       compositeMs: 0,
     },
     webglMetrics: { drawCalls: 0, shaderCompiles: 0, otherEvents: 0 },
+    animationMetrics: {
+      animations: (fallback.collectedAnimations ?? []).map((a) => ({
+        id: a.id,
+        name: a.name,
+        type: a.type,
+        startTimeSec: a.startTimeSec,
+        durationMs: a.durationMs,
+        delayMs: a.delayMs,
+        properties: a.properties,
+        bottleneckHint: inferBottleneck(a.properties, a.name),
+      })),
+      animationFrameEventsPerSec: {
+        label: "Animation frames",
+        unit: "count",
+        points: [],
+      },
+      totalAnimations: fallback.collectedAnimations?.length ?? 0,
+    },
     webVitals: {
       tbtMs: fallback.samples.reduce(
         (sum, sample) => sum + Math.max(0, sample.cpuBusyMs - 50),
@@ -1561,7 +1817,43 @@ const readClientCollectorSnapshot = async (page: Page) => {
       const globalWindow = window as Window & {
         __perftraceCollector?: ClientCollector;
       };
-      return globalWindow.__perftraceCollector ?? null;
+      let collector = globalWindow.__perftraceCollector ?? null;
+      try {
+        const paints = performance.getEntriesByType?.("paint") ?? [];
+        const fcpFallback = paints.find(
+          (e) => e.name === "first-contentful-paint"
+        )?.startTime;
+        const lcps =
+          performance.getEntriesByType?.("largest-contentful-paint") ?? [];
+        const lcpFallback =
+          lcps.length > 0 ? lcps[lcps.length - 1].startTime : undefined;
+        const shifts = performance.getEntriesByType?.("layout-shift") ?? [];
+        let clsFallback = 0;
+        for (const e of shifts) {
+          const entry = e as PerformanceEntry & {
+            value?: number;
+            hadRecentInput?: boolean;
+          };
+          if (!entry.hadRecentInput && typeof entry.value === "number")
+            clsFallback += entry.value;
+        }
+        if (!collector) {
+          return {
+            longTasks: [],
+            cls: clsFallback,
+            fcp: fcpFallback,
+            lcp: lcpFallback,
+          } as ClientCollector;
+        }
+        return {
+          ...collector,
+          fcp: collector.fcp ?? fcpFallback,
+          lcp: collector.lcp ?? lcpFallback,
+          cls: Math.max(collector.cls ?? 0, clsFallback),
+        };
+      } catch {
+        return collector;
+      }
     })) as ClientCollector | null;
   } catch {
     return null;
