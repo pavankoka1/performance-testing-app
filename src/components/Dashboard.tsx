@@ -1,8 +1,8 @@
 "use client";
 
 import type { PerfReport } from "@/lib/reportTypes";
-import { Activity, Cpu, ShieldCheck } from "lucide-react";
-import { useState } from "react";
+import { Activity, Cpu, Layers, ShieldCheck } from "lucide-react";
+import { useCallback, useState } from "react";
 import { Toaster, toast } from "react-hot-toast";
 import LiveMetricsPanel from "./LiveMetricsPanel";
 import MetricsGlossary from "./MetricsGlossary";
@@ -25,11 +25,12 @@ const isValidUrl = (value: string) => {
 export default function Dashboard() {
   const [url, setUrl] = useState("");
   const [cpuThrottle, setCpuThrottle] = useState<CpuThrottle>(1);
+  const [trackReactRerenders, setTrackReactRerenders] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [report, setReport] = useState<PerfReport | null>(null);
 
-  const handleStart = async () => {
+  const handleStart = useCallback(async () => {
     if (!isValidUrl(url)) {
       toast.error("Enter a valid URL starting with http:// or https://");
       return;
@@ -46,6 +47,7 @@ export default function Dashboard() {
           action: "start",
           url,
           cpuThrottle,
+          trackReactRerenders,
         }),
       });
       const data = await readJsonResponse(response);
@@ -63,9 +65,9 @@ export default function Dashboard() {
       toast.error(message);
       setIsRecording(false);
     }
-  };
+  }, [url, trackReactRerenders]);
 
-  const handleStop = async () => {
+  const handleStop = useCallback(async () => {
     setIsRecording(false);
     setIsProcessing(true);
     try {
@@ -91,7 +93,7 @@ export default function Dashboard() {
     } finally {
       setIsProcessing(false);
     }
-  };
+  }, []);
 
   return (
     <div className="min-h-screen bg-[var(--bg)] text-[var(--fg)]">
@@ -140,6 +142,20 @@ export default function Dashboard() {
                 <option value={6}>6× — Heavier throttle</option>
               </select>
             </div>
+            <label className="flex cursor-pointer items-center gap-2 text-sm text-[var(--fg)]">
+              <input
+                type="checkbox"
+                checked={trackReactRerenders}
+                onChange={(e) => setTrackReactRerenders(e.target.checked)}
+                disabled={isRecording || isProcessing}
+                className="h-4 w-4 rounded border-[var(--border)] text-[var(--accent)] focus:ring-[var(--accent)]"
+              />
+              <Layers className="h-4 w-4 text-[var(--accent)]" />
+              <span>Track React re-renders</span>
+              <span className="text-xs text-[var(--fg-muted)]">
+                (React apps only, dev build recommended)
+              </span>
+            </label>
             <RecordButtons
               isRecording={isRecording}
               isProcessing={isProcessing}

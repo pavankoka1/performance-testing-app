@@ -1,13 +1,14 @@
 "use client";
 
 import { Globe } from "lucide-react";
+import { memo } from "react";
 
 type URLInputProps = {
   value: string;
   onChange: (value: string) => void;
 };
 
-export default function URLInput({ value, onChange }: URLInputProps) {
+function URLInput({ value, onChange }: URLInputProps) {
   return (
     <div className="flex flex-col gap-2">
       <label
@@ -33,3 +34,5 @@ export default function URLInput({ value, onChange }: URLInputProps) {
     </div>
   );
 }
+
+export default memo(URLInput);

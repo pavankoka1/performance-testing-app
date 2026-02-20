@@ -1,7 +1,7 @@
 "use client";
 
 import { Loader2 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 
 const MESSAGES = [
   "Stopping browser and capturing trace…",
@@ -13,7 +13,7 @@ const MESSAGES = [
   "Generating animation timeline…",
 ];
 
-export default function ProcessingLoader() {
+function ProcessingLoader() {
   const [messageIndex, setMessageIndex] = useState(0);
   const [progress, setProgress] = useState(0);
 
@@ -60,3 +60,5 @@ export default function ProcessingLoader() {
     </div>
   );
 }
+
+export default memo(ProcessingLoader);

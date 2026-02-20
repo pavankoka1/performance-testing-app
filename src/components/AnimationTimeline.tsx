@@ -105,10 +105,18 @@ export default function AnimationTimeline({
                   <span
                     className="truncate"
                     title={
-                      bar.name ? humanizeAnimationName(bar.name) : "(unnamed)"
+                      bar.name
+                        ? humanizeAnimationName(bar.name)
+                        : bar.properties?.length
+                        ? bar.properties.join(", ")
+                        : "(unnamed)"
                     }
                   >
-                    {bar.name ? humanizeAnimationName(bar.name) : "(unnamed)"}
+                    {bar.name
+                      ? humanizeAnimationName(bar.name)
+                      : bar.properties?.length
+                      ? bar.properties.join(", ")
+                      : "(unnamed)"}
                   </span>
                   {bar.bottleneckHint && (
                     <span

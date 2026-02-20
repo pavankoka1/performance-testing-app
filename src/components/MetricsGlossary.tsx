@@ -12,7 +12,7 @@ import {
   Paintbrush,
   Zap,
 } from "lucide-react";
-import { useState } from "react";
+import { memo, useState } from "react";
 
 const metrics = [
   {
@@ -121,7 +121,7 @@ const metrics = [
   },
 ];
 
-export default function MetricsGlossary() {
+function MetricsGlossary() {
   const [open, setOpen] = useState(false);
   return (
     <section className="rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] overflow-hidden">
@@ -175,3 +175,5 @@ export default function MetricsGlossary() {
     </section>
   );
 }
+
+export default memo(MetricsGlossary);

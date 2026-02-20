@@ -1,19 +1,23 @@
 "use client";
 
+import { downloadReportHtml } from "@/lib/reportExport";
 import type { PerfReport } from "@/lib/reportTypes";
 import {
   Activity,
   BarChart2,
+  Download,
   Layers,
   ListChecks,
   MemoryStick,
   PlayCircle,
   Sparkles,
+  Wrench,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import AnimationTimeline from "./AnimationTimeline";
 import GraphModal from "./GraphModal";
 import MetricChart from "./MetricChart";
+import ReactRerendersSection from "./ReactRerendersSection";
 import SessionTimeline from "./SessionTimeline";
 import SpikeFrameModal from "./SpikeFrameModal";
 
@@ -38,7 +42,7 @@ const formatBytes = (value: number) => {
   return `${formatNumber(adjusted)} ${units[index]}`;
 };
 
-export default function ReportViewer({ report }: ReportViewerProps) {
+function ReportViewer({ report }: ReportViewerProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [reportTimeSec, setReportTimeSec] = useState(0);
   const [spikeModalFrame, setSpikeModalFrame] = useState<
@@ -92,7 +96,15 @@ export default function ReportViewer({ report }: ReportViewerProps) {
             </span>
           </p>
         </div>
-        <div className="flex flex-wrap gap-3 text-xs text-[var(--fg-muted)]">
+        <div className="flex flex-wrap items-center gap-3 text-xs text-[var(--fg-muted)]">
+          <button
+            type="button"
+            onClick={() => downloadReportHtml(report)}
+            className="flex items-center gap-2 rounded-full border border-[var(--border)] px-3 py-1.5 transition hover:border-[var(--accent)]/50 hover:bg-[var(--accent-dim)]"
+          >
+            <Download className="h-3.5 w-3.5" />
+            Export HTML Report
+          </button>
           <div className="rounded-full border border-[var(--border)] px-3 py-1">
             Requests: {report.networkSummary.requests}
           </div>
@@ -310,6 +322,51 @@ export default function ReportViewer({ report }: ReportViewerProps) {
           formatNumber={formatNumber}
         />
       </div>
+
+      {(report.developerHints?.layoutThrashing ||
+        report.developerHints?.reactRerenders) && (
+        <details className="mt-8 rounded-xl border border-[var(--border)] bg-[var(--bg-elevated)]/80 p-4">
+          <summary className="cursor-pointer text-sm font-semibold text-[var(--fg)]">
+            <Wrench className="mr-2 inline h-4 w-4" />
+            Developer hints
+          </summary>
+          <div className="mt-4 space-y-4">
+            {report.developerHints?.layoutThrashing && (
+              <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-card)] p-3">
+                <p className="mb-2 text-sm font-medium text-[var(--fg)]">
+                  Layout thrashing
+                </p>
+                {report.developerHints.layoutThrashing.detected ? (
+                  <p className="text-xs text-[var(--fg-muted)]">
+                    Detected{" "}
+                    {report.developerHints.layoutThrashing.layoutsInWorstBurst}{" "}
+                    layout events within{" "}
+                    {report.developerHints.layoutThrashing.windowMs}ms at{" "}
+                    {formatNumber(
+                      report.developerHints.layoutThrashing.worstBurstAtSec
+                    )}
+                    s. Batch DOM reads before writes; avoid offsetHeight /
+                    getBoundingClientRect in loops.
+                  </p>
+                ) : (
+                  <p className="text-xs text-[var(--fg-muted)]">
+                    No significant layout thrashing detected.
+                  </p>
+                )}
+              </div>
+            )}
+            {report.developerHints?.reactRerenders && (
+              <div className="mt-2">
+                <ReactRerendersSection
+                  data={report.developerHints.reactRerenders}
+                  durationSec={durationSec}
+                  formatNumber={formatNumber}
+                />
+              </div>
+            )}
+          </div>
+        </details>
+      )}
 
       <details className="mt-8 rounded-xl border border-[var(--border)] bg-[var(--bg-elevated)]/80 p-4">
         <summary className="cursor-pointer text-sm font-semibold text-[var(--fg)]">
@@ -530,3 +587,5 @@ export default function ReportViewer({ report }: ReportViewerProps) {
     </section>
   );
 }
+
+export default memo(ReportViewer);

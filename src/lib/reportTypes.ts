@@ -111,4 +111,57 @@ export type PerfReport = {
     format: "webm";
   } | null;
   suggestions: BottleneckSuggestion[];
+  /** Developer hints for layout thrashing, re-renders, etc. */
+  developerHints?: {
+    layoutThrashing?: {
+      detected: boolean;
+      burstCount: number;
+      worstBurstAtSec: number;
+      layoutsInWorstBurst: number;
+      windowMs: number;
+    };
+    reactRerenders?: {
+      totalEvents: number;
+      durationSec: number;
+      components: Array<{
+        name: string;
+        renderCount: number;
+        triggeredBy?: string;
+        inBursts: number;
+        source?: string;
+      }>;
+      topRerenderers: Array<{
+        name: string;
+        count: number;
+        triggeredBy?: string;
+        parentHierarchy?: string;
+        inBursts: number;
+      }>;
+      /** Time-bucketed data for chart: Y=count, X=time */
+      chartData: Array<{
+        timeSec: number;
+        value: number;
+        components: Array<{ name: string; count: number; hierarchy?: string }>;
+      }>;
+      /** Events with estimated time for timeline */
+      timeline: Array<{
+        index: number;
+        timeSec: number;
+        componentName: string;
+        triggeredBy?: string;
+        parentHierarchy?: string;
+        op?: string;
+        inBurst: boolean;
+      }>;
+      /** Burst windows: [startIndex, endIndex, count] */
+      bursts: Array<{
+        startIndex: number;
+        endIndex: number;
+        count: number;
+        startTimeSec: number;
+        endTimeSec: number;
+        topComponents: Array<{ name: string; count: number }>;
+      }>;
+    };
+  };
 };

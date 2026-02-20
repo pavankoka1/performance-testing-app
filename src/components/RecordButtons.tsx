@@ -1,6 +1,7 @@
 "use client";
 
 import { Play, Square } from "lucide-react";
+import { memo } from "react";
 
 type RecordButtonsProps = {
   isRecording: boolean;
@@ -9,7 +10,7 @@ type RecordButtonsProps = {
   onStop: () => void;
 };
 
-export default function RecordButtons({
+function RecordButtons({
   isRecording,
   isProcessing,
   onStart,
@@ -38,3 +39,5 @@ export default function RecordButtons({
     </div>
   );
 }
+
+export default memo(RecordButtons);

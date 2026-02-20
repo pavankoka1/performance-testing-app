@@ -10,7 +10,12 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type RecordRequest =
-  | { action: "start"; url: string; cpuThrottle?: 1 | 4 | 6 }
+  | {
+      action: "start";
+      url: string;
+      cpuThrottle?: 1 | 4 | 6;
+      trackReactRerenders?: boolean;
+    }
   | { action: "stop" };
 
 export async function POST(request: Request) {
@@ -19,7 +24,12 @@ export async function POST(request: Request) {
 
     if (body.action === "start") {
       const cpuThrottle = body.cpuThrottle ?? 1;
-      const status = await startRecording(body.url, cpuThrottle);
+      const trackReactRerenders = body.trackReactRerenders ?? false;
+      const status = await startRecording(
+        body.url,
+        cpuThrottle,
+        trackReactRerenders
+      );
       return NextResponse.json({ status });
     }
 

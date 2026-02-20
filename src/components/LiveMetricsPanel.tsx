@@ -2,16 +2,12 @@
 
 import type { LiveMetrics } from "@/lib/playwrightUtils";
 import { Cpu, Gauge, LayoutGrid, MemoryStick } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 
 const formatNum = (n: number | null) =>
   n != null ? (Number.isInteger(n) ? String(n) : n.toFixed(2)) : "—";
 
-export default function LiveMetricsPanel({
-  isRecording,
-}: {
-  isRecording: boolean;
-}) {
+function LiveMetricsPanel({ isRecording }: { isRecording: boolean }) {
   const [metrics, setMetrics] = useState<LiveMetrics | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -93,3 +89,5 @@ export default function LiveMetricsPanel({
     </div>
   );
 }
+
+export default memo(LiveMetricsPanel);

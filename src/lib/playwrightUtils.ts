@@ -22,6 +22,11 @@ type TraceEvent = {
   args?: Record<string, unknown>;
 };
 
+type RrtClient = {
+  getEvents: (offset?: number, limit?: number) => Promise<unknown[]>;
+  getEventCount: () => Promise<number>;
+};
+
 type TraceSession = {
   browser: Browser;
   context: BrowserContext;
@@ -45,6 +50,7 @@ type TraceSession = {
   viewportSize: { width: number; height: number };
   cpuThrottle: number;
   collectedAnimations: CollectedAnimation[];
+  rrtClient?: RrtClient;
 };
 
 let activeSession: TraceSession | null = null;
@@ -109,6 +115,137 @@ const PAINT_TRIGGERING_PROPS = new Set([
   "filter",
   "border-radius",
 ]);
+
+function mergeOverlappingBursts<
+  T extends {
+    startIndex: number;
+    endIndex: number;
+    count: number;
+    startTimeSec: number;
+    endTimeSec: number;
+    topComponents: Array<{ name: string; count: number }>;
+  }
+>(raw: T[], parsed: Array<{ timeSec: number; componentName: string }>): T[] {
+  if (raw.length <= 1) return raw;
+  const merged: T[] = [];
+  let cur = { ...raw[0] };
+  for (let i = 1; i < raw.length; i++) {
+    const next = raw[i];
+    if (next.startIndex <= cur.endIndex + 5) {
+      cur.endIndex = Math.max(cur.endIndex, next.endIndex);
+      cur.count = cur.endIndex - cur.startIndex + 1;
+      cur.endTimeSec = parsed[cur.endIndex]?.timeSec ?? cur.endTimeSec;
+      const byName = new Map<string, number>();
+      for (let j = cur.startIndex; j <= cur.endIndex; j++) {
+        const n = parsed[j]?.componentName;
+        if (n) byName.set(n, (byName.get(n) ?? 0) + 1);
+      }
+      cur.topComponents = [...byName.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 5)
+        .map(([name, count]) => ({ name, count }));
+    } else {
+      merged.push(cur as T);
+      cur = { ...next };
+    }
+  }
+  merged.push(cur as T);
+  return merged;
+}
+
+const SKIP_KEYFRAME_KEYS = new Set([
+  "offset",
+  "easing",
+  "composite",
+  "compositeOperation",
+]);
+
+function extractPropertiesFromAnimation(
+  a: Record<string, unknown>,
+  source: Record<string, unknown> | undefined
+): string[] | undefined {
+  const properties: string[] = [];
+  const lower = (s: string) => s.toLowerCase();
+
+  // 1. CSSTransition: source.transitionProperty or source.cssProperty
+  if (a.type === "CSSTransition" && source) {
+    const prop =
+      (source.transitionProperty as string) ??
+      (source.cssProperty as string) ??
+      (source.property as string);
+    if (
+      typeof prop === "string" &&
+      prop &&
+      !SKIP_KEYFRAME_KEYS.has(lower(prop))
+    ) {
+      properties.push(prop.trim());
+    }
+    if (Array.isArray(source.transitionProperty)) {
+      for (const p of source.transitionProperty) {
+        if (typeof p === "string" && !SKIP_KEYFRAME_KEYS.has(lower(p)))
+          properties.push(p.trim());
+      }
+    }
+    if (properties.length) return properties;
+  }
+
+  // 2. KeyframesRule.keyframes[].style
+  const keyframesRule = source?.keyframesRule as
+    | { keyframes?: Array<Record<string, unknown>> }
+    | undefined;
+  const keyframeList = keyframesRule?.keyframes ?? [];
+  for (const kf of keyframeList) {
+    const style = (kf.style ?? kf) as Record<string, string> | undefined;
+    if (style && typeof style === "object") {
+      for (const key of Object.keys(style)) {
+        if (!SKIP_KEYFRAME_KEYS.has(lower(key)) && !properties.includes(key))
+          properties.push(key);
+      }
+    }
+  }
+  if (properties.length) return properties;
+
+  // 3. Keyframe top-level keys (some impls put props directly on keyframe)
+  for (const kf of keyframeList) {
+    if (kf && typeof kf === "object") {
+      for (const key of Object.keys(kf)) {
+        if (!SKIP_KEYFRAME_KEYS.has(lower(key)) && !properties.includes(key))
+          properties.push(key);
+      }
+    }
+  }
+  return properties.length ? properties : undefined;
+}
+
+function extractAnimationName(
+  a: Record<string, unknown>,
+  source: Record<string, unknown> | undefined
+): string {
+  const direct = a.name as string | undefined;
+  if (typeof direct === "string" && direct.trim()) return direct.trim();
+
+  const keyframesRule = source?.keyframesRule as { name?: string } | undefined;
+  const kfName = keyframesRule?.name;
+  if (typeof kfName === "string" && kfName.trim()) return kfName.trim();
+
+  if (a.type === "CSSTransition" && source) {
+    const prop =
+      (source.transitionProperty as string) ??
+      (source.cssProperty as string) ??
+      (source.property as string);
+    if (typeof prop === "string" && prop.trim()) {
+      return `Transition (${prop.trim()})`;
+    }
+    if (Array.isArray(source.transitionProperty)) {
+      const parts = (source.transitionProperty as string[])
+        .filter((p): p is string => typeof p === "string" && !!p.trim())
+        .map((p) => p.trim());
+      if (parts.length) return `Transition (${parts.join(", ")})`;
+    }
+  }
+
+  return "";
+}
 
 function inferBottleneck(
   properties?: string[],
@@ -228,7 +365,8 @@ const getLaunchOptions = async () => {
 
 export const startRecording = async (
   url: string,
-  cpuThrottle: 1 | 4 | 6 = 1
+  cpuThrottle: 1 | 4 | 6 = 1,
+  trackReactRerenders = false
 ) => {
   if (activeSession) {
     throw new Error("A recording session is already running.");
@@ -276,40 +414,21 @@ export const startRecording = async (
         const a = (params as { animation: Record<string, unknown> }).animation;
         if (!a || typeof a.id !== "string") return;
         const source = a.source as Record<string, unknown> | undefined;
-        const keyframesRule = source?.keyframesRule as
-          | {
-              keyframes?: Array<Record<string, unknown>>;
-            }
-          | undefined;
-        const keyframeList = keyframesRule?.keyframes ?? [];
-        const properties: string[] = [];
-        for (const kf of keyframeList) {
-          const style = kf.style as Record<string, string> | undefined;
-          if (style && typeof style === "object") {
-            for (const key of Object.keys(style)) {
-              if (
-                key !== "offset" &&
-                key !== "easing" &&
-                !properties.includes(key)
-              )
-                properties.push(key);
-            }
-          }
-        }
+        const properties = extractPropertiesFromAnimation(a, source);
         const duration =
           typeof source?.duration === "number" ? source.duration : undefined;
         const delay =
           typeof source?.delay === "number" ? source.delay : undefined;
         collectedAnimations.push({
           id: a.id,
-          name: (a.name as string) ?? "",
+          name: extractAnimationName(a, source),
           type:
             (a.type as "CSSTransition" | "CSSAnimation" | "WebAnimation") ??
             "WebAnimation",
           startTimeSec: (Date.now() - recordingStartMs) / 1000,
           durationMs: duration != null ? duration : undefined,
           delayMs: delay != null ? delay : undefined,
-          properties: properties.length ? properties : undefined,
+          properties,
         });
       }
     );
@@ -341,6 +460,19 @@ export const startRecording = async (
 
   await ensureClientCollectors(page);
   await ensureMemoryAndDomCollector(page);
+  await ensureAnimationPropertyCollector(page);
+
+  let rrtClient: RrtClient | undefined;
+  if (trackReactRerenders) {
+    try {
+      const newTrackerClient = (
+        await import("react-render-tracker/headless-browser-client")
+      ).default;
+      rrtClient = await newTrackerClient(page);
+    } catch {
+      // React Render Tracker may fail for non-React pages or unsupported env
+    }
+  }
 
   const recordingStartMs = Date.now();
   await page.goto(safeUrl, { waitUntil: "domcontentloaded" });
@@ -348,6 +480,7 @@ export const startRecording = async (
   const updateActivePage = async (newPage: Page) => {
     await ensureClientCollectors(newPage);
     await ensureMemoryAndDomCollector(newPage);
+    await ensureAnimationPropertyCollector(newPage);
     await ensureFpsCollector(newPage);
     const newMetrics = await context.newCDPSession(newPage);
     await newMetrics.send("Performance.enable");
@@ -360,40 +493,21 @@ export const startRecording = async (
             .animation;
           if (!a || typeof a.id !== "string") return;
           const source = a.source as Record<string, unknown> | undefined;
-          const keyframesRule = source?.keyframesRule as
-            | {
-                keyframes?: Array<Record<string, unknown>>;
-              }
-            | undefined;
-          const keyframeList = keyframesRule?.keyframes ?? [];
-          const properties: string[] = [];
-          for (const kf of keyframeList) {
-            const style = kf.style as Record<string, string> | undefined;
-            if (style && typeof style === "object") {
-              for (const key of Object.keys(style)) {
-                if (
-                  key !== "offset" &&
-                  key !== "easing" &&
-                  !properties.includes(key)
-                )
-                  properties.push(key);
-              }
-            }
-          }
+          const properties = extractPropertiesFromAnimation(a, source);
           const duration =
             typeof source?.duration === "number" ? source.duration : undefined;
           const delay =
             typeof source?.delay === "number" ? source.delay : undefined;
           collectedAnimations.push({
             id: a.id,
-            name: (a.name as string) ?? "",
+            name: extractAnimationName(a, source),
             type:
               (a.type as "CSSTransition" | "CSSAnimation" | "WebAnimation") ??
               "WebAnimation",
             startTimeSec: (Date.now() - recordingStartMs) / 1000,
             durationMs: duration != null ? duration : undefined,
             delayMs: delay != null ? delay : undefined,
-            properties: properties.length ? properties : undefined,
+            properties,
           });
         }
       );
@@ -589,6 +703,7 @@ export const startRecording = async (
     viewportSize: { width: viewportWidth, height: viewportHeight },
     cpuThrottle,
     collectedAnimations,
+    rrtClient,
   };
 
   return {
@@ -618,6 +733,7 @@ export const stopRecording = async (): Promise<PerfReport> => {
     networkRequests,
     sampleInterval,
     collectedAnimations = [],
+    rrtClient,
   } = activeSession;
   activeSession = null;
 
@@ -641,6 +757,270 @@ export const stopRecording = async (): Promise<PerfReport> => {
     fpsSamples.push(...pageFps);
   } catch {
     // Ignore FPS sampling failures.
+  }
+
+  let clientAnimationProps: ClientAnimationProps[] = [];
+  try {
+    clientAnimationProps = (await page.evaluate(() => {
+      const w = window as Window & {
+        __perftraceAnimationProps?: ClientAnimationProps[];
+      };
+      return w.__perftraceAnimationProps ?? [];
+    })) as ClientAnimationProps[];
+  } catch {
+    // Ignore
+  }
+
+  let reactRerenderHint: NonNullable<
+    PerfReport["developerHints"]
+  >["reactRerenders"] = undefined;
+  if (rrtClient) {
+    try {
+      const events = (await rrtClient.getEvents()) as Array<
+        Record<string, unknown>
+      >;
+      const durationMs = stopRequestedAt - startedAt;
+      const durationSec = durationMs / 1000;
+      const BURST_WINDOW = 15;
+      const BURST_THRESHOLD = 5;
+
+      const getComponentName = (
+        obj: Record<string, unknown> | undefined
+      ): string => {
+        if (!obj) return "";
+        const type = obj.type as Record<string, unknown> | undefined;
+        const displayName =
+          (obj.displayName as string) ?? (type?.displayName as string);
+        const name = (type?.name as string) ?? (obj.name as string);
+        if (typeof displayName === "string" && displayName) return displayName;
+        if (typeof name === "string" && name) return name;
+        return "";
+      };
+
+      const buildOwnerChain = (e: Record<string, unknown>): string[] => {
+        const chain: string[] = [];
+        let current: Record<string, unknown> | undefined = e.owner as
+          | Record<string, unknown>
+          | undefined;
+        while (current) {
+          const n = getComponentName(current);
+          if (n) chain.push(n);
+          current = current.owner as Record<string, unknown> | undefined;
+        }
+        return chain;
+      };
+
+      const getName = (e: Record<string, unknown>): string => {
+        const fiber = e.fiber as Record<string, unknown> | undefined;
+        const name =
+          getComponentName(fiber) ??
+          getComponentName(e as Record<string, unknown>) ??
+          (e.name as string) ??
+          (e.componentName as string);
+        if (typeof name === "string" && name) return name;
+        const fid = e.fiberId ?? e.id;
+        return typeof fid === "number" || typeof fid === "string"
+          ? `Component#${fid}`
+          : "(anonymous)";
+      };
+
+      const getOwner = (e: Record<string, unknown>): string | undefined => {
+        const owner = e.owner as Record<string, unknown> | undefined;
+        if (!owner) return undefined;
+        return getComponentName(owner) || undefined;
+      };
+
+      const parsed = events.map((e, i) => {
+        const componentName = getName(e);
+        const owner = getOwner(e);
+        const hierarchy = buildOwnerChain(e);
+        const parentHierarchy =
+          hierarchy.length > 0 ? hierarchy.join(" → ") : undefined;
+        return {
+          index: i,
+          timeSec: events.length > 0 ? (i / events.length) * durationSec : 0,
+          componentName,
+          triggeredBy: owner,
+          parentHierarchy,
+          op: e.op as string | undefined,
+        };
+      });
+
+      const byComponent = new Map<
+        string,
+        {
+          count: number;
+          triggeredBy: Set<string>;
+          indices: number[];
+          hierarchy: Set<string>;
+        }
+      >();
+      for (const p of parsed) {
+        const cur = byComponent.get(p.componentName) ?? {
+          count: 0,
+          triggeredBy: new Set<string>(),
+          indices: [],
+          hierarchy: new Set<string>(),
+        };
+        cur.count += 1;
+        cur.indices.push(p.index);
+        if (p.triggeredBy) cur.triggeredBy.add(p.triggeredBy);
+        if (p.parentHierarchy) cur.hierarchy.add(p.parentHierarchy);
+        byComponent.set(p.componentName, cur);
+      }
+
+      const rawBursts: Array<{
+        startIndex: number;
+        endIndex: number;
+        count: number;
+        startTimeSec: number;
+        endTimeSec: number;
+        topComponents: Array<{ name: string; count: number }>;
+      }> = [];
+      for (let i = 0; i < parsed.length; i++) {
+        const end = Math.min(i + BURST_WINDOW, parsed.length);
+        const slice = parsed.slice(i, end);
+        if (slice.length >= BURST_THRESHOLD) {
+          const byNameInBurst = new Map<string, number>();
+          for (const p of slice) {
+            byNameInBurst.set(
+              p.componentName,
+              (byNameInBurst.get(p.componentName) ?? 0) + 1
+            );
+          }
+          rawBursts.push({
+            startIndex: i,
+            endIndex: end - 1,
+            count: slice.length,
+            startTimeSec: parsed[i].timeSec,
+            endTimeSec: parsed[end - 1]?.timeSec ?? parsed[i].timeSec,
+            topComponents: [...byNameInBurst.entries()]
+              .sort((a, b) => b[1] - a[1])
+              .slice(0, 5)
+              .map(([name, count]) => ({ name, count })),
+          });
+          i = end - 1;
+        }
+      }
+      const bursts = mergeOverlappingBursts(rawBursts, parsed);
+
+      const burstIndices = new Set<number>();
+      for (const b of bursts) {
+        for (let i = b.startIndex; i <= b.endIndex; i++) burstIndices.add(i);
+      }
+
+      const timeline = parsed.map((p) => ({
+        ...p,
+        inBurst: burstIndices.has(p.index),
+      }));
+
+      const componentInBursts = new Map<string, number>();
+      for (const p of timeline) {
+        if (p.inBurst) {
+          componentInBursts.set(
+            p.componentName,
+            (componentInBursts.get(p.componentName) ?? 0) + 1
+          );
+        }
+      }
+
+      const BUCKET_SEC = Math.max(0.5, durationSec / 60);
+      const chartBuckets = new Map<
+        number,
+        Map<string, { count: number; hierarchy?: string }>
+      >();
+      for (const p of timeline) {
+        const bucket = Math.floor(p.timeSec / BUCKET_SEC) * BUCKET_SEC;
+        const compMap = chartBuckets.get(bucket) ?? new Map();
+        const cur = compMap.get(p.componentName) ?? {
+          count: 0,
+          hierarchy: p.parentHierarchy,
+        };
+        cur.count += 1;
+        compMap.set(p.componentName, cur);
+        chartBuckets.set(bucket, compMap);
+      }
+      const chartData = [...chartBuckets.entries()]
+        .sort((a, b) => a[0] - b[0])
+        .map(([timeSec, compMap]) => ({
+          timeSec,
+          value: [...compMap.values()].reduce((s, c) => s + c.count, 0),
+          components: [...compMap.entries()]
+            .sort((a, b) => b[1].count - a[1].count)
+            .map(([name, c]) => ({
+              name,
+              count: c.count,
+              hierarchy: c.hierarchy,
+            })),
+        }));
+
+      const topRerenderers = [...byComponent.entries()]
+        .sort((a, b) => b[1].count - a[1].count)
+        .slice(0, 15)
+        .map(([name, data]) => ({
+          name,
+          count: data.count,
+          triggeredBy:
+            data.triggeredBy.size > 0
+              ? [...data.triggeredBy].join(", ")
+              : undefined,
+          parentHierarchy:
+            data.hierarchy.size > 0
+              ? [...data.hierarchy].slice(0, 2).join(" | ")
+              : undefined,
+          inBursts: componentInBursts.get(name) ?? 0,
+        }));
+
+      if (byComponent.size > 0) {
+        reactRerenderHint = {
+          totalEvents: events.length,
+          durationSec,
+          components: [...byComponent.entries()].map(([name, data]) => ({
+            name,
+            renderCount: data.count,
+            triggeredBy:
+              data.triggeredBy.size > 0
+                ? [...data.triggeredBy].join(", ")
+                : undefined,
+            inBursts: componentInBursts.get(name) ?? 0,
+          })),
+          topRerenderers,
+          chartData,
+          timeline,
+          bursts,
+        };
+      }
+    } catch {
+      // RRT getEvents may fail
+    }
+  }
+
+  for (const anim of collectedAnimations) {
+    const animStartMs = (anim.startTimeSec ?? 0) * 1000;
+    let best: ClientAnimationProps | null = null;
+    let bestScore = Infinity;
+    for (const c of clientAnimationProps) {
+      const timeDiff = Math.abs(c.startTime - animStartMs);
+      if (timeDiff >= 2000) continue;
+      const nameMatch =
+        !anim.name ||
+        anim.name === c.name ||
+        (anim.name &&
+          c.name &&
+          (anim.name.toLowerCase().includes(c.name.toLowerCase()) ||
+            c.name.toLowerCase().includes(anim.name.toLowerCase())));
+      if (!nameMatch) continue;
+      if (timeDiff < bestScore) {
+        bestScore = timeDiff;
+        best = c;
+      }
+    }
+    if (best) {
+      if (!anim.name && best.name) anim.name = best.name;
+      if (!anim.properties?.length && best.properties?.length) {
+        anim.properties = best.properties;
+      }
+    }
   }
 
   const clientCollector = await readClientCollectorSnapshot(page);
@@ -725,6 +1105,12 @@ export const stopRecording = async (): Promise<PerfReport> => {
   report.video = lastVideoPath
     ? { url: "/api/record?video=1", format: "webm" }
     : null;
+  if (reactRerenderHint) {
+    report.developerHints = {
+      ...report.developerHints,
+      reactRerenders: reactRerenderHint,
+    };
+  }
   normalizeReportTimeRange(report);
   if (shouldLog) {
     const summary: Record<string, unknown> = {
@@ -1004,6 +1390,7 @@ const parseTrace = async (
   let paintCount = 0;
   let layoutTimeMs = 0;
   let paintTimeMs = 0;
+  const layoutTimestamps: number[] = [];
 
   const longTasks: Array<{
     name: string;
@@ -1085,6 +1472,7 @@ const parseTrace = async (
       layoutCount += 1;
       layoutTimeMs += dur / 1000;
       layoutMs += dur / 1000;
+      layoutTimestamps.push(ts);
     }
 
     if (PAINT_EVENT_NAMES.has(name)) {
@@ -1450,6 +1838,56 @@ const parseTrace = async (
     }
   }
 
+  const detectLayoutThrashing = (): NonNullable<
+    PerfReport["developerHints"]
+  >["layoutThrashing"] => {
+    if (layoutTimestamps.length < 5) return undefined;
+    const sorted = [...layoutTimestamps].sort((a, b) => a - b);
+    const tsIsMicros = rawTraceSpan > 1e6;
+    const window16 = tsIsMicros ? 16_000 : 16;
+    const window50 = tsIsMicros ? 50_000 : 50;
+    let maxIn16 = 0;
+    let maxIn50 = 0;
+    let worstTs16 = sorted[0];
+    let worstTs50 = sorted[0];
+    for (let i = 0; i < sorted.length; i++) {
+      const ts = sorted[i];
+      const in16 = sorted.filter((t) => t >= ts && t <= ts + window16).length;
+      const in50 = sorted.filter((t) => t >= ts && t <= ts + window50).length;
+      if (in16 > maxIn16) {
+        maxIn16 = in16;
+        worstTs16 = ts;
+      }
+      if (in50 > maxIn50) {
+        maxIn50 = in50;
+        worstTs50 = ts;
+      }
+    }
+    const thrashing16 = maxIn16 >= 5;
+    const thrashing50 = maxIn50 >= 10;
+    const detected = thrashing16 || thrashing50;
+    if (detected) {
+      suggestions.push({
+        title: "Possible layout thrashing",
+        detail:
+          "Multiple layout/reflow events in quick succession. Avoid reading layout properties (offsetHeight, getBoundingClientRect) in loops. Batch DOM reads, then writes. Consider CSS containment.",
+        severity: "warning",
+      });
+    }
+    const worstBurst = thrashing16 ? maxIn16 : maxIn50;
+    const worstTs = thrashing16 ? worstTs16 : worstTs50;
+    const windowMs = thrashing16 ? 16 : 50;
+    return {
+      detected,
+      burstCount: (thrashing16 ? 1 : 0) + (thrashing50 ? 1 : 0),
+      worstBurstAtSec: tsToSec(worstTs),
+      layoutsInWorstBurst: worstBurst,
+      windowMs,
+    };
+  };
+
+  const layoutThrashingHint = detectLayoutThrashing();
+
   const requestList =
     fallback.networkRequests.length > 0
       ? fallback.networkRequests
@@ -1506,26 +1944,42 @@ const parseTrace = async (
       shaderCompiles: webglShaderCompiles,
       otherEvents: webglOtherEvents,
     },
-    animationMetrics: {
-      animations: (fallback.collectedAnimations ?? []).map((a) => ({
-        id: a.id,
-        name: a.name,
-        type: a.type,
-        startTimeSec: a.startTimeSec,
-        durationMs: a.durationMs,
-        delayMs: a.delayMs,
-        properties: a.properties,
-        bottleneckHint: inferBottleneck(a.properties, a.name),
-      })),
-      animationFrameEventsPerSec: mapToSeries(
+    animationMetrics: (() => {
+      const traceAnimFrames = mapToSeries(
         animationFrameMap,
         "Animation frames",
         "count"
-      ),
-      totalAnimations:
-        (fallback.collectedAnimations?.length ?? 0) +
-        [...animationFrameMap.values()].reduce((s, v) => s + v, 0),
-    },
+      );
+      const animFramesPerSec =
+        traceAnimFrames.points.length >= 2
+          ? traceAnimFrames
+          : {
+              label: "Animation frames (rAF / FPS)",
+              unit: "count",
+              points:
+                fpsSeries.points.length >= 2
+                  ? [...fpsSeries.points]
+                  : fallback.fpsSamples.length >= 2
+                  ? [...fallback.fpsSamples]
+                  : [],
+            };
+      return {
+        animations: (fallback.collectedAnimations ?? []).map((a) => ({
+          id: a.id,
+          name: a.name,
+          type: a.type,
+          startTimeSec: a.startTimeSec,
+          durationMs: a.durationMs,
+          delayMs: a.delayMs,
+          properties: a.properties,
+          bottleneckHint: inferBottleneck(a.properties, a.name),
+        })),
+        animationFrameEventsPerSec: animFramesPerSec,
+        totalAnimations:
+          (fallback.collectedAnimations?.length ?? 0) +
+          [...animationFrameMap.values()].reduce((s, v) => s + v, 0),
+      };
+    })(),
     webVitals: {
       tbtMs: 0,
       longTaskCount: longTasks.length,
@@ -1537,6 +1991,10 @@ const parseTrace = async (
     spikeFrames: [],
     video: null,
     suggestions,
+    developerHints:
+      layoutThrashingHint !== undefined
+        ? { layoutThrashing: layoutThrashingHint }
+        : undefined,
   };
 };
 
@@ -1640,11 +2098,18 @@ const buildFallbackReport = (
         properties: a.properties,
         bottleneckHint: inferBottleneck(a.properties, a.name),
       })),
-      animationFrameEventsPerSec: {
-        label: "Animation frames",
-        unit: "count",
-        points: [],
-      },
+      animationFrameEventsPerSec:
+        fallback.fpsSamples.length >= 2
+          ? {
+              label: "Animation frames (rAF / FPS)",
+              unit: "count",
+              points: fallback.fpsSamples,
+            }
+          : {
+              label: "Animation frames",
+              unit: "count",
+              points: [] as MetricPoint[],
+            },
       totalAnimations: fallback.collectedAnimations?.length ?? 0,
     },
     webVitals: {
@@ -1777,6 +2242,88 @@ const ensureClientCollectors = async (page: Page) => {
     }
 
     globalWindow.__perftraceCollector = collector;
+  });
+};
+
+type ClientAnimationProps = {
+  name: string;
+  startTime: number;
+  duration: number;
+  properties: string[];
+};
+
+const ensureAnimationPropertyCollector = async (page: Page) => {
+  await page.addInitScript(() => {
+    const skipKeys = new Set([
+      "offset",
+      "easing",
+      "composite",
+      "compositeoperation",
+      "flex",
+      "flexgrow",
+      "flexshrink",
+      "flexbasis",
+    ]);
+    const w = window as Window & {
+      __perftraceAnimationProps?: ClientAnimationProps[];
+    };
+    if (w.__perftraceAnimationProps !== undefined) return;
+    w.__perftraceAnimationProps = [];
+    const seen = new Set<string>();
+    const getName = (anim: Animation): string => {
+      const cssAnim = anim as Animation & { animationName?: string };
+      const transitionAnim = anim as Animation & {
+        transitionProperty?: string;
+      };
+      if (typeof cssAnim.animationName === "string" && cssAnim.animationName)
+        return String(cssAnim.animationName);
+      if (
+        typeof transitionAnim.transitionProperty === "string" &&
+        transitionAnim.transitionProperty
+      )
+        return "Transition (" + String(transitionAnim.transitionProperty) + ")";
+      return "";
+    };
+    const poll = () => {
+      try {
+        const anims = document.getAnimations?.() ?? [];
+        for (const anim of anims) {
+          const effect = anim.effect as KeyframeEffect | null;
+          if (!effect?.getKeyframes) continue;
+          const keyframes = effect.getKeyframes();
+          const props: string[] = [];
+          for (const kf of keyframes) {
+            if (kf && typeof kf === "object") {
+              for (const key of Object.keys(kf)) {
+                const k = key.toLowerCase();
+                if (!skipKeys.has(k) && !props.includes(key)) props.push(key);
+              }
+            }
+          }
+          const name = getName(anim);
+          const startTime = anim.startTime;
+          const timing = (
+            effect as KeyframeEffect & {
+              getComputedTiming?: () => { duration?: number };
+            }
+          ).getComputedTiming?.();
+          const duration =
+            timing?.duration != null ? Number(timing.duration) : 0;
+          const start = Number(startTime) || 0;
+          const key = `${name}-${Math.round(start)}-${Math.round(duration)}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          w.__perftraceAnimationProps!.push({
+            name: name,
+            startTime: start,
+            duration: duration,
+            properties: props,
+          });
+        }
+      } catch {}
+    };
+    poll();
+    setInterval(poll, 400);
   });
 };
 
